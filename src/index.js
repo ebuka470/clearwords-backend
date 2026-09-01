@@ -7,7 +7,17 @@ require('dotenv').config();
 
 const { connectDB } = require('./config/mongodb');
 
-// Routes
+// ============================================
+// APP INITIALIZATION
+// ============================================
+
+const app = express();
+const PORT = process.env.PORT || 3000;
+
+// ============================================
+// ROUTES
+// ============================================
+
 const authRoutes = require('./routes/auth');
 const userRoutes = require('./routes/users');
 const progressRoutes = require('./routes/progress');
@@ -18,16 +28,15 @@ const notificationRoutes = require('./routes/notifications');
 const subscriptionRoutes = require('./routes/subscription');
 const curriculumRoutes = require('./routes/curriculum');
 const ttsRouter = require('./routes/tts');
-app.use('/clearwordsapi', ttsRouter);
 
-const app = express();
-const PORT = process.env.PORT || 3000;
+// ============================================
+// CONNECT DATABASE
+// ============================================
 
-// Connect to MongoDB
 connectDB();
 
 // ============================================
-// MIDDLEWARE
+// SECURITY
 // ============================================
 
 app.use(helmet({
@@ -35,19 +44,73 @@ app.use(helmet({
     crossOriginEmbedderPolicy: false
 }));
 
-app.use(compression());
+// ============================================
+// CORS
+// ============================================
 
 app.use(cors({
-    origin: process.env.CORS_ORIGIN || '*',
+    origin: function (origin, callback) {
+        // Allow requests without an Origin header
+        // such as server-to-server requests
+        if (!origin) {
+            return callback(null, true);
+        }
+
+        const allowedOrigins = [
+            'https://clearwords.vercel.app',
+            'http://localhost:3000',
+            'http://localhost:5173',
+            'http://localhost:8081',
+            'http://localhost:19006'
+        ];
+
+        if (allowedOrigins.includes(origin)) {
+            return callback(null, true);
+        }
+
+        console.log('Blocked CORS origin:', origin);
+
+        return callback(new Error('Not allowed by CORS'));
+    },
+
     credentials: true,
-    methods: ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS'],
-    allowedHeaders: ['Content-Type', 'Authorization', 'X-Requested-With'],
+
+    methods: [
+        'GET',
+        'POST',
+        'PUT',
+        'DELETE',
+        'OPTIONS'
+    ],
+
+    allowedHeaders: [
+        'Content-Type',
+        'Authorization',
+        'X-Requested-With'
+    ],
+
     maxAge: 86400
 }));
 
+// Explicitly handle OPTIONS preflight requests
+app.options('*', cors());
+
+// ============================================
+// GENERAL MIDDLEWARE
+// ============================================
+
+app.use(compression());
+
 app.use(morgan('dev'));
-app.use(express.json({ limit: '10mb' }));
-app.use(express.urlencoded({ extended: true, limit: '10mb' }));
+
+app.use(express.json({
+    limit: '10mb'
+}));
+
+app.use(express.urlencoded({
+    extended: true,
+    limit: '10mb'
+}));
 
 // ============================================
 // HEALTH CHECK
@@ -64,7 +127,17 @@ app.get('/health', (req, res) => {
 });
 
 // ============================================
-// ROUTES
+// CLEARWORDS TTS ROUTE
+// ============================================
+
+// This gives:
+// POST /clearwordsapi/tts
+// GET  /clearwordsapi/tts/credits
+
+app.use('/clearwordsapi', ttsRouter);
+
+// ============================================
+// OTHER API ROUTES
 // ============================================
 
 app.use('/api/auth', authRoutes);
@@ -76,18 +149,28 @@ app.use('/api/follow', followRoutes);
 app.use('/api/notifications', notificationRoutes);
 app.use('/api/subscription', subscriptionRoutes);
 app.use('/api/curriculum', curriculumRoutes);
-app.use('/api/tts', ttsRoutes);
+
+// Use the same ttsRouter variable
+app.use('/api/tts', ttsRouter);
 
 // ============================================
-// ERROR HANDLING
+// 404 HANDLER
 // ============================================
 
 app.use((req, res) => {
-    res.status(404).json({ error: 'Endpoint not found' });
+    res.status(404).json({
+        error: 'Endpoint not found',
+        path: req.originalUrl
+    });
 });
+
+// ============================================
+// ERROR HANDLER
+// ============================================
 
 app.use((err, req, res, next) => {
     console.error('Server error:', err.stack);
+
     res.status(err.status || 500).json({
         error: err.message || 'Internal server error'
     });
@@ -98,7 +181,8 @@ app.use((err, req, res, next) => {
 // ============================================
 
 app.listen(PORT, () => {
-    console.log(`🚀 ClearWords Backend v2.0`);
-    console.log(`📍 Running on: http://localhost:${PORT}`);
-    console.log(`📊 Health: http://localhost:${PORT}/health`);
+    console.log('🚀 ClearWords Backend v2.0');
+    console.log(`📍 Running on port ${PORT}`);
+    console.log(`📊 Health: /health`);
+    console.log(`🎤 TTS: /clearwordsapi/tts`);
 });
