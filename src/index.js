@@ -17,8 +17,7 @@ const followRoutes = require('./routes/follow');
 const notificationRoutes = require('./routes/notifications');
 const subscriptionRoutes = require('./routes/subscription');
 const curriculumRoutes = require('./routes/curriculum');
-// In your main server file (e.g., server.js)
-const ttsRouter = require('./tts');
+const ttsRouter = require('./routes/tts');
 app.use('/clearwordsapi', ttsRouter);
 
 const app = express();
