@@ -103,7 +103,7 @@ router.post('/tts', async (req, res) => {
             method: 'POST',
             headers: {
                 'Content-Type': 'application/json',
-                'X-API-Key': NINE_JALINGO_API_KEY
+                'Authorization': `Bearer ${NINE_JALINGO_API_KEY}`
             },
             body: JSON.stringify(requestBody)
         });
