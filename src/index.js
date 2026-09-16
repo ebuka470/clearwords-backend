@@ -57,6 +57,7 @@ app.use(cors({
         }
 
         const allowedOrigins = [
+            'https://clearwords.com.ng',
             'https://clearwords.vercel.app',
             'http://localhost:3000',
             'http://localhost:5173',
