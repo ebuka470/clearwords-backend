@@ -153,7 +153,7 @@ app.use('/api/follow', followRoutes);
 app.use('/api/notifications', notificationRoutes);
 app.use('/api/subscription', subscriptionRoutes);
 app.use('/api/curriculum', curriculumRoutes);
-
+app.get('/', (req, res) => res.json({ status: 'ok' }));
 // Use the same ttsRouter variable
 app.use('/api/tts', ttsRouter);
 
