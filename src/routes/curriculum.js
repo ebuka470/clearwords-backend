@@ -12,7 +12,7 @@ const __dirname = dirname(__filename);
 
 // Load all curriculum data
 const CURRICULUM_DATA = {};
-const DATA_DIR = path.join(__dirname, '../data');
+const DATA_DIR = path.join(__dirname, '../../data');
 
 // Check if data directory exists, create if not
 if (!fs.existsSync(DATA_DIR)) {
