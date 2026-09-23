@@ -64,6 +64,8 @@ app.use(cors({
         }
 
         const allowedOrigins = [
+            'https://clearwords.com.ng',
+            'https://www.clearwords.com.ng',
             'https://clearwords.vercel.app',
             'http://localhost:3000',
             'http://localhost:5173',
@@ -119,6 +121,8 @@ app.use(express.urlencoded({
     limit: '10mb'
 }));
 
+app.set('trust proxy', 1);
+
 // ============================================
 // HEALTH CHECK
 // ============================================
@@ -156,7 +160,7 @@ app.use('/api/follow', followRoutes);
 app.use('/api/notifications', notificationRoutes);
 app.use('/api/subscription', subscriptionRoutes);
 app.use('/api/curriculum', curriculumRoutes);
-
+app.get('/', (req, res) => res.json({ status: 'ok' }));
 // Use the same ttsRouter variable
 app.use('/api/tts', ttsRouter);
 
