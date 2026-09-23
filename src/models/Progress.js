@@ -1,4 +1,4 @@
-const mongoose = require('mongoose');
+import mongoose from 'mongoose';
 
 const ProgressSchema = new mongoose.Schema({
     userId: { type: mongoose.Schema.Types.ObjectId, ref: 'User', required: true, index: true },
@@ -21,4 +21,6 @@ const ProgressSchema = new mongoose.Schema({
 
 ProgressSchema.index({ userId: 1, language: 1 }, { unique: true });
 
-module.exports = mongoose.model('Progress', ProgressSchema);
+const Progress = mongoose.model('Progress', ProgressSchema);
+
+export default Progress;

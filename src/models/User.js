@@ -1,4 +1,4 @@
-const mongoose = require('mongoose');
+import mongoose from 'mongoose';
 
 const UserSchema = new mongoose.Schema({
     auth0Id: { type: String, required: true, unique: true, index: true },
@@ -56,4 +56,6 @@ UserSchema.pre('save', function(next) {
     next();
 });
 
-module.exports = mongoose.model('User', UserSchema);
+const User = mongoose.model('User', UserSchema);
+
+export default User;

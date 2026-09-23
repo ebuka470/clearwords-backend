@@ -1,9 +1,10 @@
-const express = require('express');
+import express from 'express';
+import Follow from '../models/Follow.js';
+import User from '../models/User.js';
+import Notification from '../models/Notification.js';
+import { authenticateUser } from '../middleware/auth.js';
+
 const router = express.Router();
-const Follow = require('../models/Follow');
-const User = require('../models/User');
-const Notification = require('../models/Notification');
-const { authenticateUser } = require('../middleware/auth');
 
 /**
  * POST /api/follow/:userId
@@ -112,4 +113,4 @@ router.get('/check/:userId', authenticateUser, async (req, res) => {
     }
 });
 
-module.exports = router;
+export default router;

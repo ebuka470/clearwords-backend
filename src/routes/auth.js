@@ -1,8 +1,9 @@
-const express = require('express');
+import express from 'express';
+import jwt from 'jsonwebtoken';
+import User from '../models/User.js';
+import Progress from '../models/Progress.js';
+
 const router = express.Router();
-const jwt = require('jsonwebtoken');
-const User = require('../models/User');
-const Progress = require('../models/Progress');
 
 /**
  * POST /api/auth/signup
@@ -105,4 +106,4 @@ router.get('/me', async (req, res) => {
     }
 });
 
-module.exports = router;
+export default router;

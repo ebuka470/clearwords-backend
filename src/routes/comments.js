@@ -1,9 +1,11 @@
-const express = require('express');
+import express from 'express';
+import Comment from '../models/Comment.js';
+import Post from '../models/Post.js';
+import Notification from '../models/Notification.js';
+import User from '../models/User.js';
+import { authenticateUser } from '../middleware/auth.js';
+
 const router = express.Router();
-const Comment = require('../models/Comment');
-const Post = require('../models/Post');
-const Notification = require('../models/Notification');
-const { authenticateUser } = require('../middleware/auth');
 
 /**
  * GET /api/comments/:postId
@@ -130,4 +132,4 @@ router.delete('/:commentId', authenticateUser, async (req, res) => {
     }
 });
 
-module.exports = router;
+export default router;

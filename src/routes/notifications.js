@@ -1,7 +1,8 @@
-const express = require('express');
+import express from 'express';
+import Notification from '../models/Notification.js';
+import { authenticateUser } from '../middleware/auth.js';
+
 const router = express.Router();
-const Notification = require('../models/Notification');
-const { authenticateUser } = require('../middleware/auth');
 
 /**
  * GET /api/notifications
@@ -125,4 +126,4 @@ router.delete('/:notificationId', authenticateUser, async (req, res) => {
     }
 });
 
-module.exports = router;
+export default router;

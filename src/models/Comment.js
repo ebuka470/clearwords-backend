@@ -1,4 +1,4 @@
-const mongoose = require('mongoose');
+import mongoose from 'mongoose';
 
 const CommentSchema = new mongoose.Schema({
     postId: { type: mongoose.Schema.Types.ObjectId, ref: 'Post', required: true, index: true },
@@ -16,4 +16,6 @@ const CommentSchema = new mongoose.Schema({
     deletedAt: { type: Date, default: null }
 });
 
-module.exports = mongoose.model('Comment', CommentSchema);
+const Comment = mongoose.model('Comment', CommentSchema);
+
+export default Comment;

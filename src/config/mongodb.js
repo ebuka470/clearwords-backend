@@ -1,11 +1,13 @@
-const mongoose = require('mongoose');
-require('dotenv').config();
+import mongoose from 'mongoose';
+import dotenv from 'dotenv';
+
+dotenv.config();
 
 const MONGODB_URI = process.env.MONGODB_URI;
 
 let isConnected = false;
 
-async function connectDB() {
+export async function connectDB() {
     if (isConnected) {
         console.log('✅ Using existing MongoDB connection');
         return;
@@ -26,4 +28,4 @@ mongoose.connection.on('disconnected', () => {
     isConnected = false;
 });
 
-module.exports = { connectDB, mongoose };
+export { mongoose };

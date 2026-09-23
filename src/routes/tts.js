@@ -1,7 +1,8 @@
-const express = require('express');
+import express from 'express';
+import axios from 'axios';
+import { Mistral } from '@mistralai/mistralai';
+
 const router = express.Router();
-const axios = require('axios');
-const { Mistral } = require('@mistralai/mistralai');
 
 // ==================== 9JALINGO TTS ====================
 /**
@@ -12,7 +13,7 @@ router.post('/tts/generate', async (req, res) => {
     const {
         text,
         voice = 'yo',
-        speaker = 'adaeze_yo',
+        speaker = 'titilayo_yo',
         response_format = 'mp3',
         temperature = 0.95,
         top_p = 0.95,
@@ -84,7 +85,7 @@ router.post('/tts', async (req, res) => {
         // Build request to 9jaLingo
         const requestBody = {
             text: text,
-            voice: voice || 'yo',
+            voice: voice || 'titilayo_yo',
             response_format: response_format || 'mp3',
             temperature: temperature || 0.95,
             top_p: top_p || 0.95,
@@ -204,4 +205,4 @@ router.post("/generate", async (req, res) => {
     }
 });
 
-module.exports = router;
+export default router;

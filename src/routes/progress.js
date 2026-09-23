@@ -1,8 +1,9 @@
-const express = require('express');
+import express from 'express';
+import Progress from '../models/Progress.js';
+import User from '../models/User.js';
+import { authenticateUser } from '../middleware/auth.js';
+
 const router = express.Router();
-const Progress = require('../models/Progress');
-const User = require('../models/User');
-const { authenticateUser } = require('../middleware/auth');
 
 /**
  * GET /api/progress
@@ -113,4 +114,4 @@ router.delete('/:language', authenticateUser, async (req, res) => {
     }
 });
 
-module.exports = router;
+export default router;

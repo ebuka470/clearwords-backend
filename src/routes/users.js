@@ -1,8 +1,9 @@
-const express = require('express');
+import express from 'express';
+import User from '../models/User.js';
+import Follow from '../models/Follow.js';
+import { authenticateUser } from '../middleware/auth.js';
+
 const router = express.Router();
-const User = require('../models/User');
-const Follow = require('../models/Follow');
-const { authenticateUser } = require('../middleware/auth');
 
 /**
  * GET /api/users/:identifier
@@ -124,4 +125,4 @@ router.get('/:userId/stats', async (req, res) => {
     }
 });
 
-module.exports = router;
+export default router;

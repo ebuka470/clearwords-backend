@@ -1,8 +1,9 @@
-const express = require('express');
+import express from 'express';
+import User from '../models/User.js';
+import Subscription from '../models/Subscription.js';
+import { authenticateUser } from '../middleware/auth.js';
+
 const router = express.Router();
-const User = require('../models/User');
-const Subscription = require('../models/Subscription');
-const { authenticateUser } = require('../middleware/auth');
 
 /**
  * GET /api/subscription
@@ -85,4 +86,4 @@ router.post('/update', async (req, res) => {
     }
 });
 
-module.exports = router;
+export default router;

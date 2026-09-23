@@ -1,6 +1,6 @@
 const rateLimitMap = new Map();
 
-function rateLimiter(limit = 100, windowMs = 900000) {
+export function rateLimiter(limit = 100, windowMs = 900000) {
     return function(req, res, next) {
         const ip = req.ip || req.connection.remoteAddress || 'unknown';
         const key = `${ip}:${req.path}`;
@@ -40,5 +40,3 @@ function rateLimiter(limit = 100, windowMs = 900000) {
         next();
     };
 }
-
-module.exports = { rateLimiter };

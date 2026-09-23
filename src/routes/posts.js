@@ -1,9 +1,10 @@
-const express = require('express');
+import express from 'express';
+import Post from '../models/Post.js';
+import User from '../models/User.js';
+import Notification from '../models/Notification.js';
+import { authenticateUser } from '../middleware/auth.js';
+
 const router = express.Router();
-const Post = require('../models/Post');
-const User = require('../models/User');
-const Notification = require('../models/Notification');
-const { authenticateUser } = require('../middleware/auth');
 
 /**
  * GET /api/posts/feed
@@ -174,4 +175,4 @@ router.delete('/:postId', authenticateUser, async (req, res) => {
     }
 });
 
-module.exports = router;
+export default router;

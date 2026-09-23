@@ -1,10 +1,10 @@
-const jwt = require('jsonwebtoken');
-const User = require('../models/User');
+import jwt from 'jsonwebtoken';
+import User from '../models/User.js';
 
 /**
  * Authenticate user via JWT token
  */
-async function authenticateUser(req, res, next) {
+export async function authenticateUser(req, res, next) {
     const authHeader = req.headers.authorization;
 
     if (!authHeader || !authHeader.startsWith('Bearer ')) {
@@ -46,5 +46,3 @@ async function authenticateUser(req, res, next) {
         res.status(401).json({ error: 'Unauthorized: ' + error.message });
     }
 }
-
-module.exports = { authenticateUser };

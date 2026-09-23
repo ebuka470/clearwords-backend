@@ -1,11 +1,33 @@
-const express = require('express');
-const cors = require('cors');
-const helmet = require('helmet');
-const compression = require('compression');
-const morgan = require('morgan');
-require('dotenv').config();
+import express from 'express';
+import cors from 'cors';
+import helmet from 'helmet';
+import compression from 'compression';
+import morgan from 'morgan';
+import axios from 'axios';
+import dotenv from 'dotenv';
 
-const { connectDB } = require('./config/mongodb');
+import { connectDB } from './config/mongodb.js';
+
+// ============================================
+// ROUTES
+// ============================================
+
+import authRoutes from './routes/auth.js';
+import userRoutes from './routes/users.js';
+import progressRoutes from './routes/progress.js';
+import postRoutes from './routes/posts.js';
+import commentRoutes from './routes/comments.js';
+import followRoutes from './routes/follow.js';
+import notificationRoutes from './routes/notifications.js';
+import subscriptionRoutes from './routes/subscription.js';
+import curriculumRoutes from './routes/curriculum.js';
+import ttsRouter from './routes/tts.js';
+
+// ============================================
+// ENV
+// ============================================
+
+dotenv.config();
 
 // ============================================
 // APP INITIALIZATION
@@ -13,21 +35,6 @@ const { connectDB } = require('./config/mongodb');
 
 const app = express();
 const PORT = process.env.PORT || 3000;
-
-// ============================================
-// ROUTES
-// ============================================
-
-const authRoutes = require('./routes/auth');
-const userRoutes = require('./routes/users');
-const progressRoutes = require('./routes/progress');
-const postRoutes = require('./routes/posts');
-const commentRoutes = require('./routes/comments');
-const followRoutes = require('./routes/follow');
-const notificationRoutes = require('./routes/notifications');
-const subscriptionRoutes = require('./routes/subscription');
-const curriculumRoutes = require('./routes/curriculum');
-const ttsRouter = require('./routes/tts');
 
 // ============================================
 // CONNECT DATABASE

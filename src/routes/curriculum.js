@@ -1,7 +1,14 @@
-const express = require('express');
+import express from 'express';
+import fs from 'fs';
+import path from 'path';
+import { fileURLToPath } from 'url';
+import { dirname } from 'path';
+
 const router = express.Router();
-const fs = require('fs');
-const path = require('path');
+
+// Recreate __dirname for ESM
+const __filename = fileURLToPath(import.meta.url);
+const __dirname = dirname(__filename);
 
 // Load all curriculum data
 const CURRICULUM_DATA = {};
@@ -83,4 +90,4 @@ router.get('/check/:language', (req, res) => {
     });
 });
 
-module.exports = router;
+export default router;
