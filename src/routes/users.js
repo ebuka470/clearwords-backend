@@ -1,13 +1,11 @@
 import express from 'express';
 import User from '../models/User.js';
-import Follow from '../models/Follow.js';
 import { authenticateUser } from '../middleware/auth.js';
 
 const router = express.Router();
 
 /**
  * GET /api/users/:identifier
- * Get user profile by ID or username
  */
 router.get('/:identifier', async (req, res) => {
     const { identifier } = req.params;
@@ -20,13 +18,10 @@ router.get('/:identifier', async (req, res) => {
             user = await User.findOne({ username: identifier.replace('@', '') });
         }
 
-        if (!user) {
-            return res.status(404).json({ error: 'User not found' });
-        }
+        if (!user) return res.status(404).json({ error: 'User not found' });
 
         res.json({
             id: user._id,
-            email: user.email,
             fullName: user.fullName,
             username: user.username,
             bio: user.bio,
@@ -37,12 +32,14 @@ router.get('/:identifier', async (req, res) => {
             isPublic: user.isPublic,
             segment: user.segment,
             language: user.language,
-            followersCount: user.followersCount,
-            followingCount: user.followingCount,
-            postsCount: user.postsCount,
+            learningLanguages: user.learningLanguages,
+            teachingLanguages: user.teachingLanguages,
+            subscriptionTier: user.subscriptionTier,
+            podsJoined: user.podsJoined,
+            activePairs: user.activePairs,
+            cardsShared: user.cardsShared,
             createdAt: user.createdAt
         });
-
     } catch (error) {
         console.error('Get user error:', error);
         res.status(400).json({ error: error.message });
@@ -51,22 +48,20 @@ router.get('/:identifier', async (req, res) => {
 
 /**
  * PUT /api/users/profile
- * Update user profile
  */
 router.put('/profile', authenticateUser, async (req, res) => {
-    const { fullName, username, bio, location, language, segment, isPublic } = req.body;
+    const {
+        fullName, username, bio, location, language, segment,
+        isPublic, learningLanguages, teachingLanguages
+    } = req.body;
 
     try {
         const user = await User.findById(req.userId);
-        if (!user) {
-            return res.status(404).json({ error: 'User not found' });
-        }
+        if (!user) return res.status(404).json({ error: 'User not found' });
 
         if (username && username !== user.username) {
             const existing = await User.findOne({ username });
-            if (existing) {
-                return res.status(409).json({ error: 'Username already taken' });
-            }
+            if (existing) return res.status(409).json({ error: 'Username already taken' });
             user.username = username;
         }
 
@@ -76,6 +71,9 @@ router.put('/profile', authenticateUser, async (req, res) => {
         user.language = language || user.language;
         user.segment = segment || user.segment;
         user.isPublic = isPublic !== undefined ? isPublic : user.isPublic;
+
+        if (Array.isArray(learningLanguages)) user.learningLanguages = learningLanguages;
+        if (Array.isArray(teachingLanguages)) user.teachingLanguages = teachingLanguages;
 
         await user.save();
 
@@ -89,9 +87,10 @@ router.put('/profile', authenticateUser, async (req, res) => {
             avatarUrl: user.avatarUrl,
             language: user.language,
             segment: user.segment,
-            isPublic: user.isPublic
+            isPublic: user.isPublic,
+            learningLanguages: user.learningLanguages,
+            teachingLanguages: user.teachingLanguages
         });
-
     } catch (error) {
         console.error('Update profile error:', error);
         res.status(400).json({ error: error.message });
@@ -100,25 +99,18 @@ router.put('/profile', authenticateUser, async (req, res) => {
 
 /**
  * GET /api/users/:userId/stats
- * Get user stats
  */
 router.get('/:userId/stats', async (req, res) => {
-    const { userId } = req.params;
-
     try {
-        const user = await User.findById(userId);
-        if (!user) {
-            return res.status(404).json({ error: 'User not found' });
-        }
+        const user = await User.findById(req.params.userId);
+        if (!user) return res.status(404).json({ error: 'User not found' });
 
         res.json({
-            followersCount: user.followersCount,
-            followingCount: user.followingCount,
-            postsCount: user.postsCount,
-            likesReceived: user.likesReceived,
+            podsJoined: user.podsJoined,
+            activePairs: user.activePairs,
+            cardsShared: user.cardsShared,
             referralCount: user.referralCount
         });
-
     } catch (error) {
         console.error('Get stats error:', error);
         res.status(400).json({ error: error.message });

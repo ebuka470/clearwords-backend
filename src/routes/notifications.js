@@ -6,7 +6,6 @@ const router = express.Router();
 
 /**
  * GET /api/notifications
- * Get user notifications
  */
 router.get('/', authenticateUser, async (req, res) => {
     const page = parseInt(req.query.page) || 1;
@@ -28,7 +27,6 @@ router.get('/', authenticateUser, async (req, res) => {
             limit,
             hasMore: skip + notifications.length < total
         });
-
     } catch (error) {
         console.error('Get notifications error:', error);
         res.status(400).json({ error: error.message });
@@ -37,7 +35,6 @@ router.get('/', authenticateUser, async (req, res) => {
 
 /**
  * GET /api/notifications/unread
- * Get unread count
  */
 router.get('/unread', authenticateUser, async (req, res) => {
     try {
@@ -45,9 +42,7 @@ router.get('/unread', authenticateUser, async (req, res) => {
             userId: req.userId,
             isRead: false
         });
-
         res.json({ count });
-
     } catch (error) {
         console.error('Unread count error:', error);
         res.status(400).json({ error: error.message });
@@ -56,26 +51,18 @@ router.get('/unread', authenticateUser, async (req, res) => {
 
 /**
  * PUT /api/notifications/:notificationId/read
- * Mark notification as read
  */
 router.put('/:notificationId/read', authenticateUser, async (req, res) => {
-    const { notificationId } = req.params;
-
     try {
         const notification = await Notification.findOne({
-            _id: notificationId,
+            _id: req.params.notificationId,
             userId: req.userId
         });
-
-        if (!notification) {
-            return res.status(404).json({ error: 'Notification not found' });
-        }
+        if (!notification) return res.status(404).json({ error: 'Notification not found' });
 
         notification.isRead = true;
         await notification.save();
-
         res.json({ success: true });
-
     } catch (error) {
         console.error('Mark read error:', error);
         res.status(400).json({ error: error.message });
@@ -84,7 +71,6 @@ router.put('/:notificationId/read', authenticateUser, async (req, res) => {
 
 /**
  * PUT /api/notifications/read-all
- * Mark all notifications as read
  */
 router.put('/read-all', authenticateUser, async (req, res) => {
     try {
@@ -92,9 +78,7 @@ router.put('/read-all', authenticateUser, async (req, res) => {
             { userId: req.userId, isRead: false },
             { isRead: true }
         );
-
         res.json({ success: true });
-
     } catch (error) {
         console.error('Mark all read error:', error);
         res.status(400).json({ error: error.message });
@@ -103,23 +87,15 @@ router.put('/read-all', authenticateUser, async (req, res) => {
 
 /**
  * DELETE /api/notifications/:notificationId
- * Delete a notification
  */
 router.delete('/:notificationId', authenticateUser, async (req, res) => {
-    const { notificationId } = req.params;
-
     try {
         const result = await Notification.findOneAndDelete({
-            _id: notificationId,
+            _id: req.params.notificationId,
             userId: req.userId
         });
-
-        if (!result) {
-            return res.status(404).json({ error: 'Notification not found' });
-        }
-
+        if (!result) return res.status(404).json({ error: 'Notification not found' });
         res.json({ success: true });
-
     } catch (error) {
         console.error('Delete notification error:', error);
         res.status(400).json({ error: error.message });
