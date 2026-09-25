@@ -102,13 +102,10 @@ router.post('/request', authenticateUser, async (req, res) => {
  * Auto-match the current user with an ideal language exchange partner.
  *
  * Logic:
- *   1. What languages does the current user want to LEARN?
- *   2. What languages can the current user TEACH?
- *   3. Find other users where:
- *        - they teach one of my learning languages
- *        - they learn one of my teaching languages
- *        - they are not banned, active, not already paired with me
- *   4. Rank by language overlap, same primary language, recent activity
+ *   1. Read my learningLanguages + teachingLanguages (or accept overrides)
+ *   2. Find users who teach what I learn AND learn what I teach
+ *   3. Exclude banned users, inactive users, and anyone I'm already paired with
+ *   4. Rank by language overlap, primary language match, recency of activity
  *   5. Create an active pair and notify both sides
  */
 router.post('/match', authenticateUser, async (req, res) => {
@@ -116,18 +113,18 @@ router.post('/match', authenticateUser, async (req, res) => {
         languageLearning,
         languageTeaching,
         timezoneOffsetMinutes
-    } = req.body;
+    } = req.body || {};
 
     try {
         const me = await User.findById(req.userId);
         if (!me) return res.status(404).json({ error: 'User not found' });
         if (me.isBanned) return res.status(403).json({ error: 'Account is banned' });
 
-        const myLearning = languageLearning?.length
+        const myLearning = Array.isArray(languageLearning) && languageLearning.length
             ? languageLearning
             : me.learningLanguages || [];
 
-        const myTeaching = languageTeaching?.length
+        const myTeaching = Array.isArray(languageTeaching) && languageTeaching.length
             ? languageTeaching
             : me.teachingLanguages || [];
 
@@ -137,6 +134,7 @@ router.post('/match', authenticateUser, async (req, res) => {
             });
         }
 
+        // Enforce tier pair limit
         const canPair = await canCreatePair(me);
         if (!canPair) {
             return res.status(403).json({
@@ -145,6 +143,7 @@ router.post('/match', authenticateUser, async (req, res) => {
             });
         }
 
+        // Exclude anyone I'm already paired with (pending or active)
         const existingPairs = await Pair.find({
             status: { $in: ['pending', 'active'] },
             $or: [{ userA: me._id }, { userB: me._id }]
@@ -157,6 +156,11 @@ router.post('/match', authenticateUser, async (req, res) => {
         });
         alreadyPairedWith.add(me._id.toString());
 
+        // Find candidates:
+        //   - they teach at least one of the languages I'm learning
+        //   - they learn at least one of the languages I teach
+        //   - they're not banned or inactive
+        //   - they're not already paired with me
         const candidates = await User.find({
             _id: { $nin: Array.from(alreadyPairedWith) },
             isBanned: false,
@@ -164,8 +168,8 @@ router.post('/match', authenticateUser, async (req, res) => {
             teachingLanguages: { $in: myLearning },
             learningLanguages: { $in: myTeaching }
         })
-        .limit(20)
-        .select('fullName username avatarUrl learningLanguages teachingLanguages language lastActive');
+            .limit(20)
+            .select('fullName username avatarUrl learningLanguages teachingLanguages language lastActive lastSeen');
 
         if (candidates.length === 0) {
             return res.status(404).json({
@@ -174,16 +178,23 @@ router.post('/match', authenticateUser, async (req, res) => {
             });
         }
 
+        // Rank candidates:
+        //   +3 per shared language overlap (learning↔teaching)
+        //   +2 if same primary language
+        //   +1 if recently active (last 7 days)
         const sevenDaysAgo = Date.now() - 7 * 24 * 60 * 60 * 1000;
 
         const scored = candidates.map(c => {
             let score = 0;
-            const sharedLearning = c.teachingLanguages.filter(l => myLearning.includes(l));
-            const sharedTeaching = c.learningLanguages.filter(l => myTeaching.includes(l));
+            const sharedLearning = (c.teachingLanguages || []).filter(l => myLearning.includes(l));
+            const sharedTeaching = (c.learningLanguages || []).filter(l => myTeaching.includes(l));
             score += (sharedLearning.length + sharedTeaching.length) * 3;
 
             if (c.language && c.language === me.language) score += 2;
-            if (c.lastActive && new Date(c.lastActive).getTime() > sevenDaysAgo) score += 1;
+
+            const lastActiveMs = c.lastActive ? new Date(c.lastActive).getTime()
+                : (c.lastSeen ? new Date(c.lastSeen).getTime() : 0);
+            if (lastActiveMs > sevenDaysAgo) score += 1;
 
             return { candidate: c, score, sharedLearning, sharedTeaching };
         }).sort((a, b) => b.score - a.score);
@@ -191,6 +202,7 @@ router.post('/match', authenticateUser, async (req, res) => {
         const best = scored[0];
         const target = best.candidate;
 
+        // Pick the concrete language pair to store
         const languageA = best.sharedLearning[0] || myLearning[0];
         const languageB = best.sharedTeaching[0] || myTeaching[0];
 
@@ -211,6 +223,7 @@ router.post('/match', authenticateUser, async (req, res) => {
         await User.findByIdAndUpdate(me._id, { $inc: { activePairs: 1 } });
         await User.findByIdAndUpdate(target._id, { $inc: { activePairs: 1 } });
 
+        // Notify both sides
         await Notification.insertMany([
             {
                 userId: target._id,
@@ -252,6 +265,7 @@ router.post('/match', authenticateUser, async (req, res) => {
 
 /**
  * POST /api/pairs/:pairId/accept
+ * Accept a pending pair request
  */
 router.post('/:pairId/accept', authenticateUser, async (req, res) => {
     const { pairId } = req.params;
@@ -284,7 +298,7 @@ router.post('/:pairId/accept', authenticateUser, async (req, res) => {
 
 /**
  * DELETE /api/pairs/:pairId
- * End a pair
+ * End a pair (either user can end)
  */
 router.delete('/:pairId', authenticateUser, async (req, res) => {
     const { pairId } = req.params;
@@ -324,6 +338,7 @@ router.delete('/:pairId', authenticateUser, async (req, res) => {
 
 /**
  * GET /api/pairs/:pairId/messages
+ * Fetch pair chat history
  */
 router.get('/:pairId/messages', authenticateUser, async (req, res) => {
     const { pairId } = req.params;
@@ -356,6 +371,7 @@ router.get('/:pairId/messages', authenticateUser, async (req, res) => {
 
 /**
  * POST /api/pairs/:pairId/messages
+ * Send a pair message (moderated)
  */
 router.post('/:pairId/messages', authenticateUser, moderationMiddleware, async (req, res) => {
     const { pairId } = req.params;

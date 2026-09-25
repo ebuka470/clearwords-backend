@@ -92,7 +92,6 @@ router.post('/signup', async (req, res) => {
                 const referrer = await User.findOne({ referralCode: normalized });
 
                 if (referrer && referrer._id.toString() !== user._id.toString()) {
-                    // Check for existing Referral (shouldn't exist for a fresh user, but be safe)
                     const existing = await Referral.findOne({ referredUserId: user._id });
 
                     if (!existing) {
@@ -181,7 +180,7 @@ router.get('/me', async (req, res) => {
             return res.status(404).json({ error: 'User not found' });
         }
 
-        // Refresh lastActive
+        // Refresh activity timestamps
         user.lastActive = new Date();
         user.lastSeen = new Date();
         await user.save();
