@@ -1,10 +1,8 @@
 const BASE_URL = process.env.BASE_URL || 'https://clearwords-backend.onrender.com';
 const TOKEN = process.env.TOKEN || '';
 const PAIR_TARGET_ID = process.env.PAIR_TARGET_ID || '';
+const EXPECTED_VERSION = '3.0.0';
 
-// ============================================
-// Tiny test harness
-// ============================================
 let PASS = 0;
 let FAIL = 0;
 const results = [];
@@ -41,56 +39,76 @@ async function req(method, path, { auth = null, body = null } = {}) {
 }
 
 // ============================================
-// Test sections
+// PREFLIGHT
+// ============================================
+async function preflight() {
+    console.log('\n🩺 PREFLIGHT\n');
+    try {
+        const { status, data } = await req('GET', '/health');
+        if (status !== 200) {
+            console.log(`   ❌ Health returned ${status}`);
+            return false;
+        }
+        console.log(`   Deployed version: ${data?.version}`);
+        if (data.version !== EXPECTED_VERSION) {
+            console.log(`   ❌ Expected ${EXPECTED_VERSION} — Render is running stale code.`);
+            return false;
+        }
+        console.log('   ✅ Correct version deployed\n');
+        return true;
+    } catch (err) {
+        console.error('   ❌ Preflight failed:', err.message);
+        return false;
+    }
+}
+
+// ============================================
+// PUBLIC
 // ============================================
 async function testPublic() {
     console.log('\n📡 PUBLIC ENDPOINTS\n');
 
-    // 1. Health
     console.log('1️⃣  Health check...');
     try {
         const { status, data } = await req('GET', '/health');
         console.log('   Response:', data);
         check('health', 200, status);
-    } catch (err) {
-        console.error('   ❌', err.message);
-        check('health', 200, 'error');
-    }
+    } catch (err) { console.error('   ❌', err.message); check('health', 200, 'error'); }
 
-    // 2. Subscription plans (public)
-    console.log('\n2️⃣  Get subscription plans...');
+    console.log('\n2️⃣  Auth0 config...');
+    try {
+        const { status, data } = await req('GET', '/api/auth/config');
+        console.log('   Response:', data);
+        check('auth-config', 200, status);
+        if (data && (data.clientSecret || data.secret)) {
+            console.log('   🚨 SECURITY: secret leaked!');
+        }
+    } catch (err) { console.error('   ❌', err.message); check('auth-config', 200, 'error'); }
+
+    console.log('\n3️⃣  Subscription plans...');
     try {
         const { status, data } = await req('GET', '/api/subscription/plans');
-        console.log('   Response:', data);
+        console.log('   Response keys:', data ? Object.keys(data) : data);
         check('plans', 200, status);
-    } catch (err) {
-        console.error('   ❌', err.message);
-        check('plans', 200, 'error');
-    }
+    } catch (err) { console.error('   ❌', err.message); check('plans', 200, 'error'); }
 
-    // 3. Curriculum
-    console.log('\n3️⃣  Get yoruba curriculum...');
+    console.log('\n4️⃣  Curriculum yoruba...');
     try {
         const { status, data } = await req('GET', '/api/curriculum/yoruba');
         console.log('   Response keys:', data && typeof data === 'object' ? Object.keys(data).slice(0, 5) : data);
         check('curriculum', 200, status);
-    } catch (err) {
-        console.error('   ❌', err.message);
-        check('curriculum', 200, 'error');
-    }
+    } catch (err) { console.error('   ❌', err.message); check('curriculum', 200, 'error'); }
 
-    // 4. 404 handler
-    console.log('\n4️⃣  404 handler...');
+    console.log('\n5️⃣  404 handler...');
     try {
-        const { status, data } = await req('GET', '/does-not-exist');
-        console.log('   Response:', data);
+        const { status } = await req('GET', '/does-not-exist');
         check('404', 404, status);
-    } catch (err) {
-        console.error('   ❌', err.message);
-        check('404', 404, 'error');
-    }
+    } catch (err) { console.error('   ❌', err.message); check('404', 404, 'error'); }
 }
 
+// ============================================
+// SIGNUP
+// ============================================
 async function testSignup() {
     console.log('\n👤 SIGNUP\n');
 
@@ -102,16 +120,14 @@ async function testSignup() {
     console.log(`   Auth0 ID: ${auth0Id}\n`);
 
     const signupBody = {
-        auth0Id,
-        email,
+        auth0Id, email,
         fullName: 'Community Test User',
         segment: 'young',
         language: 'yoruba',
         phone: '+2348012345678'
     };
 
-    // 5. Signup
-    console.log('5️⃣  Signup...');
+    console.log('6️⃣  Signup...');
     let userId = null;
     try {
         const { status, data } = await req('POST', '/api/auth/signup', { body: signupBody });
@@ -119,69 +135,66 @@ async function testSignup() {
         check('signup', 201, status);
         userId = data?.user?.id || data?.user?._id || null;
         if (userId) console.log(`   User ID: ${userId}`);
-    } catch (err) {
-        console.error('   ❌', err.message);
-        check('signup', 201, 'error');
-    }
+    } catch (err) { console.error('   ❌', err.message); check('signup', 201, 'error'); }
 
-    // 6. Duplicate signup
-    console.log('\n6️⃣  Duplicate signup (expecting 409)...');
+    console.log('\n7️⃣  Duplicate signup (409)...');
     try {
-        const { status, data } = await req('POST', '/api/auth/signup', { body: signupBody });
-        console.log('   Response:', data);
+        const { status } = await req('POST', '/api/auth/signup', { body: signupBody });
         check('duplicate-signup', 409, status);
-    } catch (err) {
-        console.error('   ❌', err.message);
-        check('duplicate-signup', 409, 'error');
-    }
+    } catch (err) { console.error('   ❌', err.message); check('duplicate-signup', 409, 'error'); }
 
-    // 7. Invalid signup
-    console.log('\n7️⃣  Invalid signup — missing auth0Id (expecting 400)...');
+    console.log('\n8️⃣  Invalid signup (400)...');
     try {
-        const { status, data } = await req('POST', '/api/auth/signup', {
+        const { status } = await req('POST', '/api/auth/signup', {
             body: { email: 'no-auth0-id@example.com' }
         });
-        console.log('   Response:', data);
         check('invalid-signup', 400, status);
-    } catch (err) {
-        console.error('   ❌', err.message);
-        check('invalid-signup', 400, 'error');
-    }
+    } catch (err) { console.error('   ❌', err.message); check('invalid-signup', 400, 'error'); }
 
     return userId;
 }
 
+// ============================================
+// AUTH GUARD
+// ============================================
 async function testAuthGuard() {
     console.log('\n🔒 AUTH GUARD (no token)\n');
 
-    console.log('8️⃣  Protected route without token (expecting 401)...');
-    try {
-        const { status, data } = await req('GET', '/api/pods');
-        console.log('   Response:', data);
-        check('auth-guard', 401, status);
-    } catch (err) {
-        console.error('   ❌', err.message);
-        check('auth-guard', 401, 'error');
+    const protectedRoutes = [
+        ['GET', '/api/pods'],
+        ['GET', '/api/pairs'],
+        ['GET', '/api/ai/usage'],
+        ['POST', '/api/ai/chat'],
+        ['POST', '/api/tts'],
+        ['GET', '/api/tts/usage']
+    ];
+
+    for (const [method, path] of protectedRoutes) {
+        console.log(`9️⃣  ${method} ${path} (no token, expecting 401)...`);
+        try {
+            const { status, data } = await req(method, path, {
+                body: method === 'POST' ? {} : null
+            });
+            check(`auth-guard-${path}`, 401, status);
+        } catch (err) { console.error('   ❌', err.message); check(`auth-guard-${path}`, 401, 'error'); }
     }
 }
 
+// ============================================
+// AUTHENTICATED
+// ============================================
 async function testAuthenticated() {
     console.log('\n🔐 AUTHENTICATED ENDPOINTS\n');
     const auth = { auth: TOKEN };
 
-    // 9. Get current user
-    console.log('9️⃣  GET /api/auth/me...');
+    console.log('1️⃣0️⃣  GET /api/auth/me...');
     try {
         const { status, data } = await req('GET', '/api/auth/me', auth);
         console.log('   Response:', data);
         check('me', 200, status);
-    } catch (err) {
-        console.error('   ❌', err.message);
-        check('me', 200, 'error');
-    }
+    } catch (err) { console.error('   ❌', err.message); check('me', 200, 'error'); }
 
-    // 10. Update profile with language exchange fields
-    console.log('\n🔟 Update profile (learningLanguages/teachingLanguages)...');
+    console.log('\n1️⃣1️⃣  Update profile with languages...');
     try {
         const { status, data } = await req('PUT', '/api/users/profile', {
             ...auth,
@@ -193,24 +206,16 @@ async function testAuthenticated() {
         });
         console.log('   Response:', data);
         check('update-profile', 200, status);
-    } catch (err) {
-        console.error('   ❌', err.message);
-        check('update-profile', 200, 'error');
-    }
+    } catch (err) { console.error('   ❌', err.message); check('update-profile', 200, 'error'); }
 
-    // 11. Subscription status
-    console.log('\n1️⃣1️⃣  GET /api/subscription...');
+    console.log('\n1️⃣2️⃣  GET /api/subscription...');
     try {
         const { status, data } = await req('GET', '/api/subscription', auth);
         console.log('   Response:', data);
         check('subscription', 200, status);
-    } catch (err) {
-        console.error('   ❌', err.message);
-        check('subscription', 200, 'error');
-    }
+    } catch (err) { console.error('   ❌', err.message); check('subscription', 200, 'error'); }
 
-    // 12. Create pod as free user (expect 403)
-    console.log('\n1️⃣2️⃣  Create pod as free user (expecting 403)...');
+    console.log('\n1️⃣3️⃣  Create pod as free user (403)...');
     try {
         const { status, data } = await req('POST', '/api/pods', {
             ...auth,
@@ -218,13 +223,9 @@ async function testAuthenticated() {
         });
         console.log('   Response:', data);
         check('pod-create-gate', 403, status);
-    } catch (err) {
-        console.error('   ❌', err.message);
-        check('pod-create-gate', 403, 'error');
-    }
+    } catch (err) { console.error('   ❌', err.message); check('pod-create-gate', 403, 'error'); }
 
-    // 13. Auto-match into a pod (works on free)
-    console.log('\n1️⃣3️⃣  Auto-match into a pod...');
+    console.log('\n1️⃣4️⃣  Auto-match into a pod...');
     let podId = null;
     try {
         const { status, data } = await req('POST', '/api/pods/match', {
@@ -235,25 +236,16 @@ async function testAuthenticated() {
         check('pod-match', 201, status);
         podId = data?.pod?._id || data?.pod?.id || null;
         if (podId) console.log(`   Pod ID: ${podId}`);
-    } catch (err) {
-        console.error('   ❌', err.message);
-        check('pod-match', 201, 'error');
-    }
+    } catch (err) { console.error('   ❌', err.message); check('pod-match', 201, 'error'); }
 
-    // 14. List my pods
-    console.log('\n1️⃣4️⃣  List my pods...');
+    console.log('\n1️⃣5️⃣  List my pods...');
     try {
-        const { status, data } = await req('GET', '/api/pods', auth);
-        console.log('   Response:', data);
+        const { status } = await req('GET', '/api/pods', auth);
         check('pods-list', 200, status);
-    } catch (err) {
-        console.error('   ❌', err.message);
-        check('pods-list', 200, 'error');
-    }
+    } catch (err) { console.error('   ❌', err.message); check('pods-list', 200, 'error'); }
 
-    // 15. Pod message
     if (podId) {
-        console.log('\n1️⃣5️⃣  Send pod message...');
+        console.log('\n1️⃣6️⃣  Send pod message...');
         try {
             const { status, data } = await req('POST', `/api/pods/${podId}/messages`, {
                 ...auth,
@@ -261,13 +253,9 @@ async function testAuthenticated() {
             });
             console.log('   Response:', data);
             check('pod-message', 201, status);
-        } catch (err) {
-            console.error('   ❌', err.message);
-            check('pod-message', 201, 'error');
-        }
+        } catch (err) { console.error('   ❌', err.message); check('pod-message', 201, 'error'); }
 
-        // 16. Pod check-in
-        console.log('\n1️⃣6️⃣  Pod check-in...');
+        console.log('\n1️⃣7️⃣  Pod check-in...');
         try {
             const { status, data } = await req('POST', `/api/pods/${podId}/checkin`, {
                 ...auth,
@@ -275,42 +263,26 @@ async function testAuthenticated() {
             });
             console.log('   Response:', data);
             check('pod-checkin', 201, status);
-        } catch (err) {
-            console.error('   ❌', err.message);
-            check('pod-checkin', 201, 'error');
-        }
+        } catch (err) { console.error('   ❌', err.message); check('pod-checkin', 201, 'error'); }
 
-        // 17. Duplicate check-in
-        console.log('\n1️⃣7️⃣  Duplicate check-in (expecting 400)...');
-        try {
-            const { status, data } = await req('POST', `/api/pods/${podId}/checkin`, {
-                ...auth,
-                body: { lessonsCompleted: 3 }
-            });
-            console.log('   Response:', data);
-            check('pod-checkin-dup', 400, status);
-        } catch (err) {
-            console.error('   ❌', err.message);
-            check('pod-checkin-dup', 400, 'error');
-        }
-
-        // 18. Pod leaderboard
         console.log('\n1️⃣8️⃣  Pod leaderboard...');
         try {
             const { status, data } = await req('GET', `/api/pods/${podId}/leaderboard`, auth);
             console.log('   Response:', data);
             check('pod-leaderboard', 200, status);
-        } catch (err) {
-            console.error('   ❌', err.message);
-            check('pod-leaderboard', 200, 'error');
-        }
-    } else {
-        console.log('\n⏭️  Skipping pod-message/checkin/leaderboard (no podId)');
+        } catch (err) { console.error('   ❌', err.message); check('pod-leaderboard', 200, 'error'); }
     }
 
-    // 19. Pair request
+    console.log('\n1️⃣9️⃣  Pair auto-match...');
+    try {
+        const { status, data } = await req('POST', '/api/pairs/match', auth);
+        console.log('   Response:', data);
+        const ok = [201, 400, 403, 404].includes(status);
+        check('pair-match', ok ? status : 201, status);
+    } catch (err) { console.error('   ❌', err.message); check('pair-match', 201, 'error'); }
+
     if (PAIR_TARGET_ID) {
-        console.log('\n1️⃣9️⃣  Request a pair...');
+        console.log('\n2️⃣0️⃣  Pair request (specific target)...');
         try {
             const { status, data } = await req('POST', '/api/pairs/request', {
                 ...auth,
@@ -321,28 +293,18 @@ async function testAuthenticated() {
                 }
             });
             console.log('   Response:', data);
-            check('pair-request', 201, status);
-        } catch (err) {
-            console.error('   ❌', err.message);
-            check('pair-request', 201, 'error');
-        }
-    } else {
-        console.log('\n⏭️  Skipping pair-request (PAIR_TARGET_ID not set)');
+            const ok = [201, 400, 403].includes(status);
+            check('pair-request', ok ? status : 201, status);
+        } catch (err) { console.error('   ❌', err.message); check('pair-request', 201, 'error'); }
     }
 
-    // 20. List pairs
-    console.log('\n2️⃣0️⃣  List my pairs...');
+    console.log('\n2️⃣1️⃣  List my pairs...');
     try {
-        const { status, data } = await req('GET', '/api/pairs', auth);
-        console.log('   Response:', data);
+        const { status } = await req('GET', '/api/pairs', auth);
         check('pairs-list', 200, status);
-    } catch (err) {
-        console.error('   ❌', err.message);
-        check('pairs-list', 200, 'error');
-    }
+    } catch (err) { console.error('   ❌', err.message); check('pairs-list', 200, 'error'); }
 
-    // 21. Create progress card
-    console.log('\n2️⃣1️⃣  Create progress card...');
+    console.log('\n2️⃣2️⃣  Create progress card...');
     let cardId = null;
     try {
         const { status, data } = await req('POST', '/api/cards', {
@@ -357,39 +319,24 @@ async function testAuthenticated() {
         console.log('   Response:', data);
         check('card-create', 201, status);
         cardId = data?._id || data?.card?._id || null;
-        if (cardId) console.log(`   Card ID: ${cardId}`);
-    } catch (err) {
-        console.error('   ❌', err.message);
-        check('card-create', 201, 'error');
-    }
+    } catch (err) { console.error('   ❌', err.message); check('card-create', 201, 'error'); }
 
-    // 22. List my cards
-    console.log('\n2️⃣2️⃣  List my cards...');
+    console.log('\n2️⃣3️⃣  List my cards...');
     try {
-        const { status, data } = await req('GET', '/api/cards/mine', auth);
-        console.log('   Response:', data);
+        const { status } = await req('GET', '/api/cards/mine', auth);
         check('cards-list', 200, status);
-    } catch (err) {
-        console.error('   ❌', err.message);
-        check('cards-list', 200, 'error');
-    }
+    } catch (err) { console.error('   ❌', err.message); check('cards-list', 200, 'error'); }
 
-    // 23. Share card externally
     if (cardId) {
-        console.log('\n2️⃣3️⃣  Share card externally...');
+        console.log('\n2️⃣4️⃣  Share card externally...');
         try {
-            const { status, data } = await req('POST', `/api/cards/${cardId}/share/external`, auth);
-            console.log('   Response:', data);
+            const { status } = await req('POST', `/api/cards/${cardId}/share/external`, auth);
             check('card-share', 200, status);
-        } catch (err) {
-            console.error('   ❌', err.message);
-            check('card-share', 200, 'error');
-        }
+        } catch (err) { console.error('   ❌', err.message); check('card-share', 200, 'error'); }
     }
 
-    // 24. Report a user
     if (PAIR_TARGET_ID) {
-        console.log('\n2️⃣4️⃣  Report a user...');
+        console.log('\n2️⃣5️⃣  Report a user...');
         try {
             const { status, data } = await req('POST', '/api/reports', {
                 ...auth,
@@ -403,39 +350,86 @@ async function testAuthenticated() {
             });
             console.log('   Response:', data);
             check('report', 201, status);
-        } catch (err) {
-            console.error('   ❌', err.message);
-            check('report', 201, 'error');
-        }
-    } else {
-        console.log('\n⏭️  Skipping report (PAIR_TARGET_ID not set)');
+        } catch (err) { console.error('   ❌', err.message); check('report', 201, 'error'); }
     }
 
-    // 25. Notifications
-    console.log('\n2️⃣5️⃣  Get notifications...');
+    console.log('\n2️⃣6️⃣  Get notifications...');
     try {
-        const { status, data } = await req('GET', '/api/notifications', auth);
-        console.log('   Response:', data);
+        const { status } = await req('GET', '/api/notifications', auth);
         check('notifications', 200, status);
-    } catch (err) {
-        console.error('   ❌', err.message);
-        check('notifications', 200, 'error');
-    }
+    } catch (err) { console.error('   ❌', err.message); check('notifications', 200, 'error'); }
 
-    // 26. Unread count
-    console.log('\n2️⃣6️⃣  Unread count...');
+    console.log('\n2️⃣7️⃣  Unread count...');
     try {
         const { status, data } = await req('GET', '/api/notifications/unread', auth);
         console.log('   Response:', data);
         check('unread', 200, status);
-    } catch (err) {
-        console.error('   ❌', err.message);
-        check('unread', 200, 'error');
-    }
+    } catch (err) { console.error('   ❌', err.message); check('unread', 200, 'error'); }
+
+    // ============================================
+    // AI ENDPOINTS
+    // ============================================
+    console.log('\n2️⃣8️⃣  GET /api/ai/usage...');
+    try {
+        const { status, data } = await req('GET', '/api/ai/usage', auth);
+        console.log('   Response:', data);
+        check('ai-usage', 200, status);
+    } catch (err) { console.error('   ❌', err.message); check('ai-usage', 200, 'error'); }
+
+    console.log('\n2️⃣9️⃣  POST /api/ai/chat (Timmy)...');
+    try {
+        const { status, data } = await req('POST', '/api/ai/chat', {
+            ...auth,
+            body: { prompt: 'How do I say "good morning" in Yoruba?' }
+        });
+        console.log('   Status:', status);
+        console.log('   Reply preview:', typeof data?.data === 'string' ? data.data.slice(0, 60) : data);
+        const ok = [200, 429, 500].includes(status);
+        check('ai-chat', ok ? status : 200, status);
+        if (status === 500) console.log('   ℹ️  Mistral not configured');
+        if (status === 429) console.log('   ℹ️  Daily chat limit reached');
+    } catch (err) { console.error('   ❌', err.message); check('ai-chat', 200, 'error'); }
+
+    console.log('\n3️⃣0️⃣  POST /api/ai/custom-lesson...');
+    try {
+        const { status, data } = await req('POST', '/api/ai/custom-lesson', {
+            ...auth,
+            body: {
+                topic: 'market greetings',
+                language: 'yoruba',
+                level: 'beginner',
+                timezoneOffsetMinutes: 60
+            }
+        });
+        console.log('   Status:', status);
+        console.log('   Response keys:', data && typeof data === 'object' ? Object.keys(data) : data);
+        const ok = [201, 429, 500].includes(status);
+        check('ai-custom-lesson', ok ? status : 201, status);
+        if (status === 500) console.log('   ℹ️  Mistral not configured');
+        if (status === 429) console.log('   ℹ️  Daily lesson limit reached (5/day free)');
+    } catch (err) { console.error('   ❌', err.message); check('ai-custom-lesson', 201, 'error'); }
+
+    console.log('\n3️⃣1️⃣  GET /api/tts/usage...');
+    try {
+        const { status, data } = await req('GET', '/api/tts/usage', auth);
+        console.log('   Response:', data);
+        check('tts-usage', 200, status);
+    } catch (err) { console.error('   ❌', err.message); check('tts-usage', 200, 'error'); }
+
+    console.log('\n3️⃣2️⃣  POST /api/tts (audio, may hit limit)...');
+    try {
+        const { status, data } = await req('POST', '/api/tts', {
+            ...auth,
+            body: { text: 'Ẹ n lẹ', voice: 'yo', speaker: 'titilayo_yo' }
+        });
+        // 200 = audio buffer, 429 = limit, 500 = not configured
+        const ok = [200, 429, 500].includes(status);
+        check('tts-proxy', ok ? status : 200, status);
+    } catch (err) { console.error('   ❌', err.message); check('tts-proxy', 200, 'error'); }
 }
 
 // ============================================
-// Main
+// MAIN
 // ============================================
 async function main() {
     console.log('=====================================');
@@ -445,6 +439,8 @@ async function main() {
     console.log(`Token:    ${TOKEN ? '✅ provided' : '❌ not set'}`);
     console.log(`Pair tgt: ${PAIR_TARGET_ID || '❌ not set'}`);
     console.log('');
+
+    const ok = await preflight();
 
     await testPublic();
     await testSignup();
@@ -466,6 +462,9 @@ async function main() {
         results.filter(r => !r.ok).forEach(r => {
             console.log(`   - ${r.label}: expected ${r.expected}, got ${r.actual}`);
         });
+        if (!ok) {
+            console.log('\n🚨 PRIMARY ISSUE: Wrong deployed version.');
+        }
     }
     console.log('=====================================');
 

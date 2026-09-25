@@ -35,19 +35,35 @@ const UserSchema = new mongoose.Schema({
     },
     subscriptionExpires: { type: Date, default: null },
     paystackCustomerCode: { type: String, default: null },
+
+    // Referrals
     referralCode: { type: String, sparse: true },
     referredBy: { type: mongoose.Schema.Types.ObjectId, ref: 'User', default: null },
     referralCount: { type: Number, default: 0 },
+    referralsRewarded: { type: Number, default: 0 },
+    pendingReferrals: { type: Number, default: 0 },
+
+    // Streak
+    streakFreezesAvailable: { type: Number, default: 0, min: 0 },
+
+    // Community stats
     podsJoined: { type: Number, default: 0 },
     activePairs: { type: Number, default: 0 },
     cardsShared: { type: Number, default: 0 },
+
+    // Admin
+    role: {
+        type: String,
+        enum: ['user', 'moderator', 'admin'],
+        default: 'user'
+    },
+
     createdAt: { type: Date, default: Date.now },
     updatedAt: { type: Date, default: Date.now },
     lastActive: { type: Date, default: Date.now },
     deletedAt: { type: Date, default: null }
 });
 
-// Partial unique indexes — ignore null/missing values
 UserSchema.index(
     { auth0Id: 1 },
     { unique: true, partialFilterExpression: { auth0Id: { $type: 'string' } } }
@@ -65,7 +81,7 @@ UserSchema.index(
     { unique: true, sparse: true }
 );
 
-UserSchema.pre('save', function(next) {
+UserSchema.pre('save', function (next) {
     if (!this.referralCode) {
         this.referralCode = 'CW' + Math.random().toString(36).substring(2, 8).toUpperCase();
     }

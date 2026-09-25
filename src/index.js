@@ -20,6 +20,15 @@ import notificationRoutes from './routes/notifications.js';
 import subscriptionRoutes, { paystackWebhookHandler } from './routes/subscription.js';
 import curriculumRoutes from './routes/curriculum.js';
 import ttsRouter from './routes/tts.js';
+import aiRoutes from './routes/ai.js';
+import referralRoutes from './routes/referrals.js';
+import streakRoutes from './routes/streak.js';
+import path from 'path';
+import { fileURLToPath } from 'url';
+import { dirname } from 'path';
+
+const __filename = fileURLToPath(import.meta.url);
+const __dirname = dirname(__filename);
 
 // Background jobs
 import { startPairDissolver } from './jobs/pairDissolver.js';
@@ -108,6 +117,15 @@ app.get('/health', (req, res) => {
         },
         payments: {
             paystackConfigured: !!process.env.PAYSTACK_SECRET_KEY
+        },
+        ai: {
+            mistralConfigured: !!process.env.MISTRAL_API_KEY
+        },
+        features: {
+            referrals: true,
+            streakFreeze: true,
+            lessonCompletion: true,
+            cardRendering: true
         }
     });
 });
@@ -131,6 +149,13 @@ app.use('/api/notifications', notificationRoutes);
 app.use('/api/subscription', subscriptionRoutes); // webhook already mounted above
 app.use('/api/curriculum', curriculumRoutes);
 app.use('/api/tts', ttsRouter);
+app.use('/api/ai', aiRoutes);
+app.use('/api/referrals', referralRoutes);
+app.use('/api/streak', streakRoutes);
+app.use('/public', express.static(path.join(__dirname, 'public'), {
+    maxAge: '7d',
+    immutable: false
+}));
 
 // ============================================
 // 404
@@ -166,4 +191,8 @@ app.listen(PORT, () => {
     console.log(`💰 Subscription: /api/subscription`);
     console.log(`🎤 TTS: /clearwordsapi/tts`);
     console.log(`💳 Paystack webhook: /api/subscription/webhook`);
+    console.log(`🤖 AI: /api/ai/custom-lesson`);
+    console.log(`👥 Referrals: /api/referrals`);
+    console.log(`🔥 Streak: /api/streak`);
+    console.log(`🖼️  Cards: /public/cards/*`);
 });

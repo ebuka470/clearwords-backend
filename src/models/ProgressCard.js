@@ -22,7 +22,12 @@ const ProgressCardSchema = new mongoose.Schema({
     },
 
     caption: { type: String, maxlength: 200, default: '' },
-    imageUrl: { type: String, default: '' },   // generated shareable image
+
+    // Rendered image
+    imageUrl: { type: String, default: '' },
+    imagePath: { type: String, default: '' },
+    rendered: { type: Boolean, default: false },
+    renderedAt: { type: Date, default: null },
 
     sharedInternally: [{ type: mongoose.Schema.Types.ObjectId, ref: 'Pod' }],
     sharedExternally: { type: Boolean, default: false },

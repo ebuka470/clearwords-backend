@@ -1,105 +1,99 @@
 import express from 'express';
 import axios from 'axios';
-import { Mistral } from '@mistralai/mistralai';
+import User from '../models/User.js';
+import UsageCounter from '../models/UsageCounter.js';
+import { authenticateUser } from '../middleware/auth.js';
 
 const router = express.Router();
 
-// ==================== 9JALINGO TTS ====================
-/**
- * POST /tts/generate
- * Generate TTS audio using 9jaLingo (direct)
- */
-router.post('/tts/generate', async (req, res) => {
-    const {
-        text,
-        voice = 'yo',
-        speaker = 'titilayo_yo',
-        response_format = 'mp3',
-        temperature = 0.95,
-        top_p = 0.95,
-        repetition_penalty = 1.1
-    } = req.body;
+// TTS audio daily limits
+const TTS_LIMITS = {
+    free: 30,
+    premium: 300,
+    immersive: Infinity
+};
 
-    if (!text) {
-        return res.status(400).json({ error: 'Text is required' });
+function getDateKey(timezoneOffsetMinutes) {
+    const now = new Date();
+    if (typeof timezoneOffsetMinutes === 'number') {
+        const shifted = new Date(now.getTime() + timezoneOffsetMinutes * 60 * 1000);
+        return shifted.toISOString().slice(0, 10);
     }
+    return now.toISOString().slice(0, 10);
+}
 
-    if (text.length > 500) {
-        return res.status(400).json({ error: 'Text too long (max 500 characters)' });
+async function enforceDailyLimit(user, key, limit, dateKey) {
+    if (limit === Infinity) return { ok: true };
+    const used = await UsageCounter.getCount(user._id, key, dateKey);
+    if (used >= limit) {
+        return {
+            ok: false,
+            response: {
+                status: 429,
+                body: {
+                    error: 'Daily limit reached',
+                    feature: key,
+                    limit,
+                    used,
+                    resetsAt: `${dateKey}T23:59:59Z`,
+                    upgradeUrl: '/subscription'
+                }
+            }
+        };
     }
+    return { ok: true };
+}
 
+async function recordUsage(user, key, limit, dateKey) {
+    if (limit === Infinity) return { unlimited: true };
+    const doc = await UsageCounter.increment(user._id, key, dateKey);
+    return { used: doc.count, limit, remaining: Math.max(0, limit - doc.count), dateKey };
+}
+
+// ============================================
+// POST /tts
+// TTS proxy (bypasses CORS) — authenticated + tier-gated
+// ============================================
+router.post('/tts', authenticateUser, async (req, res) => {
     try {
-        const response = await axios({
-            method: 'POST',
-            url: 'https://api.9jalingo.org/v1/tts',
-            headers: {
-                'Content-Type': 'application/json',
-                'Authorization': `Bearer ${process.env.NINE_JALINGO_API_KEY}`
-            },
-            data: {
-                text,
-                voice,
-                speaker,
-                response_format,
-                temperature,
-                top_p,
-                repetition_penalty
-            },
-            responseType: 'arraybuffer'
-        });
+        const {
+            text, voice, speaker, response_format,
+            temperature, top_p, repetition_penalty,
+            timezoneOffsetMinutes
+        } = req.body;
 
-        res.set({
-            'Content-Type': 'audio/mpeg',
-            'Content-Length': response.data.byteLength,
-            'Cache-Control': 'public, max-age=86400'
-        });
-
-        res.send(Buffer.from(response.data));
-
-    } catch (error) {
-        console.error('TTS error:', error);
-        res.status(500).json({ error: 'TTS generation failed' });
-    }
-});
-
-// ==================== 9JALINGO PROXY (for CORS bypass) ====================
-/**
- * POST /tts
- * Proxy TTS requests to 9jaLingo (bypasses CORS for frontend)
- */
-router.post('/tts', async (req, res) => {
-    try {
-        const { text, voice, speaker, response_format, temperature, top_p, repetition_penalty } = req.body;
-
-        // Validate required fields
         if (!text) {
             return res.status(400).json({ status: 'error', message: 'Missing "text" field' });
         }
+        if (text.length > 500) {
+            return res.status(400).json({ status: 'error', message: 'Text too long (max 500 chars)' });
+        }
 
-        // Get 9jaLingo API key from environment variables
         const NINE_JALINGO_API_KEY = process.env.NINE_JALINGO_API_KEY;
         if (!NINE_JALINGO_API_KEY) {
             return res.status(500).json({ status: 'error', message: '9jaLingo API key not configured' });
         }
 
-        // Build request to 9jaLingo
+        const user = await User.findById(req.userId);
+        if (!user) return res.status(404).json({ status: 'error', message: 'User not found' });
+        if (user.isBanned) return res.status(403).json({ status: 'error', message: 'Account is banned' });
+
+        const limit = TTS_LIMITS[user.subscriptionTier] ?? TTS_LIMITS.free;
+        const dateKey = getDateKey(timezoneOffsetMinutes);
+
+        const gate = await enforceDailyLimit(user, 'tts_generate', limit, dateKey);
+        if (!gate.ok) return res.status(gate.response.status).json(gate.response.body);
+
         const requestBody = {
-            text: text,
+            text,
             voice: voice || 'titilayo_yo',
             response_format: response_format || 'mp3',
             temperature: temperature || 0.95,
             top_p: top_p || 0.95,
             repetition_penalty: repetition_penalty || 1.1
         };
+        if (speaker) requestBody.speaker = speaker;
 
-        // Add speaker if provided
-        if (speaker) {
-            requestBody.speaker = speaker;
-        }
-
-        console.log('🎤 9jaLingo request:', { text: text.substring(0, 50) + '...', voice: requestBody.voice });
-
-        // Call 9jaLingo API
         const response = await fetch('https://api.9jalingo.org/v1/audio/speech', {
             method: 'POST',
             headers: {
@@ -111,7 +105,6 @@ router.post('/tts', async (req, res) => {
 
         if (!response.ok) {
             const errorText = await response.text();
-            console.error('9jaLingo error:', response.status, errorText);
             return res.status(response.status).json({
                 status: 'error',
                 message: `9jaLingo API error: ${response.status}`,
@@ -119,89 +112,67 @@ router.post('/tts', async (req, res) => {
             });
         }
 
-        // Get audio as buffer
         const audioBuffer = await response.arrayBuffer();
+        const usage = await recordUsage(user, 'tts_generate', limit, dateKey);
 
-        // Return audio with proper headers
-        const contentType = response_format === 'mp3' ? 'audio/mpeg' :
-                           response_format === 'wav' ? 'audio/wav' :
-                           response_format === 'flac' ? 'audio/flac' :
-                           'audio/mpeg';
+        const contentType = response_format === 'wav' ? 'audio/wav'
+            : response_format === 'flac' ? 'audio/flac'
+            : 'audio/mpeg';
 
         res.set({
             'Content-Type': contentType,
             'Content-Length': audioBuffer.byteLength,
-            'Cache-Control': 'public, max-age=31536000' // Cache for 1 year
+            'Cache-Control': 'public, max-age=31536000',
+            'X-Usage-Limit': String(usage.limit ?? 'unlimited'),
+            'X-Usage-Used': String(usage.used ?? 'unlimited'),
+            'X-Usage-Remaining': String(usage.remaining ?? 'unlimited')
         });
 
         res.send(Buffer.from(audioBuffer));
 
     } catch (error) {
-        console.error('9jaLingo proxy error:', error);
+        console.error('TTS proxy error:', error);
         res.status(500).json({ status: 'error', message: error.message });
     }
 });
 
-// ==================== CHECK 9JALINGO CREDITS ====================
-/**
- * GET /tts/credits
- * Check if API key is configured
- */
-router.get("/tts/credits", async (req, res) => {
+// ============================================
+// GET /tts/credits
+// ============================================
+router.get('/tts/credits', async (req, res) => {
     try {
         const NINE_JALINGO_API_KEY = process.env.NINE_JALINGO_API_KEY;
         if (!NINE_JALINGO_API_KEY) {
             return res.status(500).json({ status: 'error', message: '9jaLingo API key not configured' });
         }
-
-        res.status(200).json({
-            status: 'success',
-            message: 'API key is configured'
-        });
+        res.status(200).json({ status: 'success', message: 'API key is configured' });
     } catch (error) {
         res.status(500).json({ status: 'error', message: error.message });
     }
 });
 
-// ==================== MISTRAL AI GENERATION (for Timmy) ====================
-/**
- * POST /generate
- * Generate AI response using Mistral (used by Timmy AI chat)
- */
-router.post("/generate", async (req, res) => {
+// ============================================
+// GET /tts/usage
+// ============================================
+router.get('/usage', authenticateUser, async (req, res) => {
     try {
-        const { prompt } = req.body;
-        const apiKey = process.env.MISTRAL_API_KEY;
+        const user = await User.findById(req.userId);
+        if (!user) return res.status(404).json({ error: 'User not found' });
 
-        if (!apiKey) {
-            return res.status(500).json({ 
-                status: 'error', 
-                message: 'MISTRAL_API_KEY not configured' 
-            });
-        }
+        const dateKey = getDateKey(parseInt(req.query.timezoneOffsetMinutes));
+        const limit = TTS_LIMITS[user.subscriptionTier] ?? TTS_LIMITS.free;
+        const used = await UsageCounter.getCount(user._id, 'tts_generate', dateKey);
 
-        if (!prompt) {
-            return res.status(400).json({ 
-                status: 'error', 
-                message: 'Prompt is required' 
-            });
-        }
-
-        const client = new Mistral({ apiKey: apiKey });
-        const chatResponse = await client.chat.complete({
-            model: 'mistral-small-2506',
-            messages: [{ role: 'user', content: prompt }],
+        res.json({
+            dateKey,
+            tier: user.subscriptionTier,
+            tts: limit === Infinity
+                ? { unlimited: true, used }
+                : { used, limit, remaining: Math.max(0, limit - used) }
         });
-
-        console.log('ClearWords chat:', chatResponse.choices[0].message.content);
-        res.status(200).json({
-            status: 'success',
-            data: chatResponse.choices[0].message.content
-        });
-
     } catch (error) {
-        console.error('Generate error:', error);
-        res.status(500).json({ status: 'error', message: error.message });
+        console.error('Usage error:', error);
+        res.status(400).json({ error: error.message });
     }
 });
 

@@ -6,3 +6,6 @@ dist/
 coverage/
 .idea/
 .vscode/
+public/cards/
+public/cards/*
+!public/cards/.gitkeep
