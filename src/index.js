@@ -178,6 +178,14 @@ app.use((err, req, res, next) => {
 startPairDissolver();
 startWeeklyStreakJob();
 
+// Keep-alive
+const keepAliveUrl = 'https://clearwords-backend.onrender.com/';
+setInterval(() => {
+    axios.get(keepAliveUrl)
+        .then(r => console.log(`💓 Keep-alive ${r.status}`))
+        .catch(e => console.error(`💔 Keep-alive failed: ${e.message}`));
+}, 30000);
+
 // ============================================
 // START SERVER
 // ============================================
