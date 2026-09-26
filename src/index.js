@@ -30,6 +30,7 @@ import streakRoutes from './routes/streak.js';
 // Background jobs
 import { startPairDissolver } from './jobs/pairDissolver.js';
 import { startWeeklyStreakJob } from './jobs/weeklyStreak.js';
+import { startDormantPodJob } from './jobs/dormantPods.js';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = dirname(__filename);
@@ -39,15 +40,10 @@ dotenv.config();
 const app = express();
 const PORT = process.env.PORT || 3000;
 
-// ============================================
-// CONNECT DATABASE
-// ============================================
 connectDB();
 
 // ============================================
-// PAYSTACK WEBHOOK
-// Must be mounted BEFORE express.json() so we can capture the raw body
-// for signature verification.
+// PAYSTACK WEBHOOK — must come BEFORE express.json()
 // ============================================
 app.post(
     '/api/subscription/webhook',
@@ -65,22 +61,13 @@ app.post(
     paystackWebhookHandler
 );
 
-// ============================================
-// SECURITY
-// ============================================
-app.use(helmet({
-    contentSecurityPolicy: false,
-    crossOriginEmbedderPolicy: false
-}));
+// Security
+app.use(helmet({ contentSecurityPolicy: false, crossOriginEmbedderPolicy: false }));
 
-// ============================================
 // CORS
-// ============================================
 app.use(cors({
     origin: function (origin, callback) {
-        // Allow requests without an Origin header (server-to-server, curl, etc.)
         if (!origin) return callback(null, true);
-
         const allowedOrigins = [
             'https://clearwords.vercel.app',
             'https://clearwords.com.ng',
@@ -90,9 +77,7 @@ app.use(cors({
             'http://localhost:8081',
             'http://localhost:19006'
         ];
-
         if (allowedOrigins.includes(origin)) return callback(null, true);
-
         console.log('Blocked CORS origin:', origin);
         return callback(new Error('Not allowed by CORS'));
     },
@@ -102,28 +87,48 @@ app.use(cors({
     maxAge: 86400
 }));
 
-// Handle preflight OPTIONS requests explicitly
 app.options('*', cors());
 
-// ============================================
-// GENERAL MIDDLEWARE
-// ============================================
+// General middleware
 app.use(compression());
 app.use(morgan('dev'));
 app.use(express.json({ limit: '10mb' }));
 app.use(express.urlencoded({ extended: true, limit: '10mb' }));
 
-// ============================================
-// STATIC FILES (for rendered progress cards)
-// ============================================
+// Static files (rendered cards)
 app.use('/public', express.static(path.join(__dirname, 'public'), {
     maxAge: '7d',
     immutable: false
 }));
 
-// ============================================
-// HEALTH CHECK
-// ============================================
+// Root — friendly info
+app.get('/', (req, res) => {
+    res.json({
+        service: 'clearwords-backend',
+        version: '3.0.0',
+        status: 'healthy',
+        timestamp: new Date().toISOString(),
+        endpoints: {
+            health: '/health',
+            auth: '/api/auth',
+            users: '/api/users',
+            progress: '/api/progress',
+            pods: '/api/pods',
+            pairs: '/api/pairs',
+            cards: '/api/cards',
+            reports: '/api/reports',
+            notifications: '/api/notifications',
+            subscription: '/api/subscription',
+            curriculum: '/api/curriculum',
+            ai: '/api/ai',
+            referrals: '/api/referrals',
+            streak: '/api/streak',
+            tts: '/clearwordsapi/tts'
+        }
+    });
+});
+
+// Health
 app.get('/health', (req, res) => {
     res.json({
         status: 'healthy',
@@ -133,7 +138,8 @@ app.get('/health', (req, res) => {
         database: 'MongoDB Atlas',
         jobs: {
             pairDissolver: 'running',
-            weeklyStreak: 'running'
+            weeklyStreak: 'running',
+            dormantPods: 'running'
         },
         payments: {
             paystackConfigured: !!process.env.PAYSTACK_SECRET_KEY
@@ -144,10 +150,7 @@ app.get('/health', (req, res) => {
     });
 });
 
-// ============================================
-// TTS PUBLIC ALIAS
-// Exposes: POST /clearwordsapi/tts, GET /clearwordsapi/tts/credits
-// ============================================
+// TTS public alias
 app.use('/clearwordsapi', ttsRouter);
 
 // ============================================
@@ -168,37 +171,25 @@ app.use('/api/ai', aiRoutes);
 app.use('/api/referrals', referralRoutes);
 app.use('/api/streak', streakRoutes);
 
-// ============================================
-// 404 HANDLER
-// ============================================
+// 404
 app.use((req, res) => {
-    res.status(404).json({
-        error: 'Endpoint not found',
-        path: req.originalUrl
-    });
+    res.status(404).json({ error: 'Endpoint not found', path: req.originalUrl });
 });
 
-// ============================================
-// ERROR HANDLER
-// ============================================
+// Error handler
 app.use((err, req, res, next) => {
     console.error('Server error:', err.stack);
-    res.status(err.status || 500).json({
-        error: err.message || 'Internal server error'
-    });
+    res.status(err.status || 500).json({ error: err.message || 'Internal server error' });
 });
 
-// ============================================
-// BACKGROUND JOBS
-// ============================================
+// Background jobs
 startPairDissolver();
 startWeeklyStreakJob();
+startDormantPodJob();
 
-// ============================================
-// KEEP-ALIVE (for Render free tier)
-// ============================================
-const keepAliveUrl = 'https://clearwords-backend.onrender.com/';
-const KEEP_ALIVE_INTERVAL = 30 * 1000; // 30 seconds
+// Keep-alive
+const keepAliveUrl = 'https://clearwords-backend.onrender.com/health';
+const KEEP_ALIVE_INTERVAL = 30 * 1000;
 
 function keepAlive() {
     axios.get(keepAliveUrl)
@@ -212,9 +203,7 @@ function keepAlive() {
 
 setInterval(keepAlive, KEEP_ALIVE_INTERVAL);
 
-// ============================================
-// START SERVER
-// ============================================
+// Start server
 app.listen(PORT, () => {
     console.log('🚀 ClearWords Backend v3.0 — Community Model');
     console.log(`📍 Running on port ${PORT}`);
@@ -234,4 +223,5 @@ app.listen(PORT, () => {
     console.log(`🔥 Streak: /api/streak`);
     console.log(`🎤 TTS: /clearwordsapi/tts + /api/tts`);
     console.log(`💳 Paystack webhook: /api/subscription/webhook`);
+    console.log(`💤 Dormant pods: every 12h`);
 });

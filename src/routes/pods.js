@@ -11,7 +11,6 @@ const router = express.Router();
 
 /**
  * GET /api/pods
- * List pods the current user is in
  */
 router.get('/', authenticateUser, async (req, res) => {
     try {
@@ -29,7 +28,7 @@ router.get('/', authenticateUser, async (req, res) => {
 
 /**
  * POST /api/pods
- * Create a pod (Premium / Immersive only)
+ * Create a pod (Premium/Immersive only)
  */
 router.post('/', authenticateUser, async (req, res) => {
     const { name, description, language, level, timezone } = req.body;
@@ -70,8 +69,88 @@ router.post('/', authenticateUser, async (req, res) => {
 });
 
 /**
+ * POST /api/pods/match
+ */
+router.post('/match', authenticateUser, async (req, res) => {
+    const { language, level, timezone } = req.body;
+
+    if (!language || !level) {
+        return res.status(400).json({ error: 'language and level are required' });
+    }
+
+    try {
+        const user = await User.findById(req.userId);
+
+        const canJoin = await canJoinPod(user);
+        if (!canJoin) {
+            return res.status(403).json({
+                error: 'Pod limit reached for your tier',
+                currentTier: user.subscriptionTier
+            });
+        }
+
+        const alreadyIn = await Pod.findOne({
+            language,
+            isActive: true,
+            'members.userId': user._id
+        });
+        if (alreadyIn) {
+            return res.json({ matched: false, pod: alreadyIn, reason: 'already_in_pod' });
+        }
+
+        const candidatePod = await Pod.findOneAndUpdate(
+            {
+                language,
+                level,
+                timezone: timezone || 'Africa/Lagos',
+                isActive: true,
+                isAutoMatched: true,
+                $expr: { $lt: [{ $size: '$members' }, '$maxMembers'] }
+            },
+            {
+                $push: { members: { userId: user._id, role: 'member' } }
+            },
+            { new: true, sort: { createdAt: 1 } }
+        );
+
+        if (candidatePod) {
+            user.podsJoined = (user.podsJoined || 0) + 1;
+            await user.save();
+
+            await Notification.create({
+                userId: user._id,
+                type: 'pod_milestone',
+                podId: candidatePod._id,
+                content: `You were matched into "${candidatePod.name}"`
+            });
+
+            return res.json({ matched: true, pod: candidatePod, created: false });
+        }
+
+        const newPod = await Pod.create({
+            name: `${language} ${level} pod`,
+            description: 'Auto-generated pod',
+            language,
+            level,
+            timezone: timezone || 'Africa/Lagos',
+            creatorId: user._id,
+            isAutoMatched: true,
+            members: [{ userId: user._id, role: 'leader' }]
+        });
+
+        user.podsJoined = (user.podsJoined || 0) + 1;
+        await user.save();
+
+        res.status(201).json({ matched: true, pod: newPod, created: true });
+    } catch (error) {
+        console.error('Pod match error:', error);
+        res.status(400).json({ error: error.message });
+    }
+});
+
+/**
  * POST /api/pods/:podId/join
- * Join a pod (via invite code or direct)
+ * Enforces language match, tier limit, and 24h rejoin cooldown
  */
 router.post('/:podId/join', authenticateUser, async (req, res) => {
     const { podId } = req.params;
@@ -96,6 +175,32 @@ router.post('/:podId/join', authenticateUser, async (req, res) => {
         }
 
         const user = await User.findById(req.userId);
+        if (!user) return res.status(404).json({ error: 'User not found' });
+        if (user.isBanned) return res.status(403).json({ error: 'Account is banned' });
+
+        // 24h rejoin cooldown
+        const recentLeave = (pod.formerMembers || []).find(
+            fm => fm.userId && fm.userId.toString() === req.userId
+                && Date.now() - new Date(fm.leftAt).getTime() < 24 * 60 * 60 * 1000
+        );
+        if (recentLeave) {
+            return res.status(429).json({
+                error: 'You recently left this pod. Try rejoining in a few hours.'
+            });
+        }
+
+        // Language check
+        const isLearning = (user.learningLanguages || []).includes(pod.language);
+        const isTeaching = (user.teachingLanguages || []).includes(pod.language);
+        const isPrimary = user.language === pod.language;
+
+        if (!isLearning && !isTeaching && !isPrimary) {
+            return res.status(400).json({
+                error: `This pod is for ${pod.language} learners. Update your languages to join.`
+            });
+        }
+
+        // Tier limit
         const canJoin = await canJoinPod(user);
         if (!canJoin) {
             return res.status(403).json({
@@ -105,10 +210,26 @@ router.post('/:podId/join', authenticateUser, async (req, res) => {
         }
 
         pod.members.push({ userId: user._id, role: 'member' });
+        pod.formerMembers = (pod.formerMembers || []).filter(
+            fm => !fm.userId || fm.userId.toString() !== req.userId
+        );
         await pod.save();
 
         user.podsJoined = (user.podsJoined || 0) + 1;
         await user.save();
+
+        const leader = pod.members.find(m => m.role === 'leader');
+        if (leader && leader.userId.toString() !== req.userId) {
+            await Notification.create({
+                userId: leader.userId,
+                type: 'pod_milestone',
+                sourceId: user._id,
+                sourceUsername: user.username || 'User',
+                sourceAvatar: user.avatarUrl || '',
+                podId: pod._id,
+                content: `${user.fullName || 'Someone'} joined your pod "${pod.name}"`
+            });
+        }
 
         res.json({ success: true, pod });
     } catch (error) {
@@ -127,12 +248,20 @@ router.delete('/:podId/leave', authenticateUser, async (req, res) => {
         const pod = await Pod.findById(podId);
         if (!pod) return res.status(404).json({ error: 'Pod not found' });
 
+        const isMember = pod.members.some(m => m.userId.toString() === req.userId);
+        if (!isMember) {
+            return res.status(400).json({ error: 'Not a member of this pod' });
+        }
+
+        pod.formerMembers = pod.formerMembers || [];
+        pod.formerMembers.push({ userId: req.userId, leftAt: new Date() });
+
         pod.members = pod.members.filter(m => m.userId.toString() !== req.userId);
 
-        // If creator leaves and no members left, deactivate
         if (pod.members.length === 0) {
             pod.isActive = false;
         }
+
         await pod.save();
 
         await User.findByIdAndUpdate(req.userId, { $inc: { podsJoined: -1 } });
@@ -212,82 +341,7 @@ router.post('/:podId/messages', authenticateUser, moderationMiddleware, async (r
 });
 
 /**
- * PUT /api/pods/:podId/messages/:messageId
- * Edit a pod message (author only, within 15 min)
- */
-router.put('/:podId/messages/:messageId', authenticateUser, moderationMiddleware, async (req, res) => {
-    const { podId, messageId } = req.params;
-    const { text } = req.body;
-
-    if (!text) return res.status(400).json({ error: 'text is required' });
-
-    try {
-        const message = await PodMessage.findById(messageId);
-        if (!message || message.podId.toString() !== podId) {
-            return res.status(404).json({ error: 'Message not found' });
-        }
-
-        if (message.authorId.toString() !== req.userId) {
-            return res.status(403).json({ error: 'You can only edit your own messages' });
-        }
-
-        // 15-minute edit window
-        const ageMs = Date.now() - new Date(message.createdAt).getTime();
-        if (ageMs > 15 * 60 * 1000) {
-            return res.status(400).json({ error: 'Messages can only be edited within 15 minutes' });
-        }
-
-        message.text = text;
-        await message.save();
-
-        res.json({ success: true, message });
-    } catch (error) {
-        console.error('Edit pod message error:', error);
-        res.status(400).json({ error: error.message });
-    }
-});
-
-/**
- * DELETE /api/pods/:podId/messages/:messageId
- * Soft-delete a pod message (author or pod leader)
- */
-router.delete('/:podId/messages/:messageId', authenticateUser, async (req, res) => {
-    const { podId, messageId } = req.params;
-
-    try {
-        const [message, pod] = await Promise.all([
-            PodMessage.findById(messageId),
-            Pod.findById(podId)
-        ]);
-
-        if (!message || message.podId.toString() !== podId) {
-            return res.status(404).json({ error: 'Message not found' });
-        }
-
-        const isAuthor = message.authorId.toString() === req.userId;
-        const isLeader = pod?.members.some(
-            m => m.userId.toString() === req.userId && m.role === 'leader'
-        );
-
-        if (!isAuthor && !isLeader) {
-            return res.status(403).json({ error: 'Not authorized' });
-        }
-
-        message.isDeleted = true;
-        message.text = '[deleted]';
-        await message.save();
-
-        res.json({ success: true });
-    } catch (error) {
-        console.error('Delete pod message error:', error);
-        res.status(400).json({ error: error.message });
-    }
-});
-
-/**
  * POST /api/pods/:podId/checkin
- * Weekly check-in: "I did 5 lessons this week"
- * Also updates shared streak
  */
 router.post('/:podId/checkin', authenticateUser, async (req, res) => {
     const { podId } = req.params;
@@ -307,10 +361,9 @@ router.post('/:podId/checkin', authenticateUser, async (req, res) => {
 
         const now = new Date();
         const startOfWeek = new Date(now);
-        startOfWeek.setDate(now.getDate() - now.getDay()); // Sunday
+        startOfWeek.setDate(now.getDate() - now.getDay());
         startOfWeek.setHours(0, 0, 0, 0);
 
-        // Prevent duplicate check-ins this week
         const existing = await PodMessage.findOne({
             podId,
             authorId: req.userId,
@@ -333,8 +386,6 @@ router.post('/:podId/checkin', authenticateUser, async (req, res) => {
             type: 'checkin'
         });
 
-        // Shared streak logic:
-        // Count distinct members who checked in this week
         const distinctCheckins = await PodMessage.distinct('authorId', {
             podId,
             type: 'checkin',
@@ -347,7 +398,6 @@ router.post('/:podId/checkin', authenticateUser, async (req, res) => {
             pod.sharedStreak += 1;
             pod.lastStreakCheck = now;
 
-            // Notify all members
             const notifications = pod.members.map(m => ({
                 userId: m.userId,
                 type: 'streak_bonus',
@@ -357,7 +407,6 @@ router.post('/:podId/checkin', authenticateUser, async (req, res) => {
             await Notification.insertMany(notifications);
         }
 
-        // Add XP to pod weekly total
         pod.weeklyXP += lessonsCompleted;
         pod.totalXP += lessonsCompleted;
         await pod.save();
@@ -376,7 +425,6 @@ router.post('/:podId/checkin', authenticateUser, async (req, res) => {
 
 /**
  * GET /api/pods/:podId/leaderboard
- * Member ranking + pod ranking (across all pods of same language)
  */
 router.get('/:podId/leaderboard', authenticateUser, async (req, res) => {
     const { podId } = req.params;
@@ -398,7 +446,6 @@ router.get('/:podId/leaderboard', authenticateUser, async (req, res) => {
         startOfWeek.setDate(now.getDate() - now.getDay());
         startOfWeek.setHours(0, 0, 0, 0);
 
-        // Aggregate check-ins per member this week
         const memberXP = await PodMessage.aggregate([
             {
                 $match: {
@@ -418,7 +465,6 @@ router.get('/:podId/leaderboard', authenticateUser, async (req, res) => {
 
         const xpMap = Object.fromEntries(memberXP.map(m => [m._id.toString(), m.lessons || 0]));
 
-        // Build member leaderboard
         const memberLeaderboard = pod.members.map(m => ({
             userId: m.userId._id,
             fullName: m.userId.fullName,
@@ -428,7 +474,6 @@ router.get('/:podId/leaderboard', authenticateUser, async (req, res) => {
             weeklyXP: xpMap[m.userId._id.toString()] || 0
         })).sort((a, b) => b.weeklyXP - a.weeklyXP);
 
-        // Pod ranking (across pods of same language this week)
         const podRanking = await Pod.aggregate([
             { $match: { language: pod.language, isActive: true } },
             {
@@ -460,93 +505,6 @@ router.get('/:podId/leaderboard', authenticateUser, async (req, res) => {
         });
     } catch (error) {
         console.error('Leaderboard error:', error);
-        res.status(400).json({ error: error.message });
-    }
-});
-
-/**
- * POST /api/pods/match
- * Auto-match the user into a pod by language, level, timezone
- * Priority: fill existing pods first, create new if none found
- */
-router.post('/match', authenticateUser, async (req, res) => {
-    const { language, level, timezone } = req.body;
-
-    if (!language || !level) {
-        return res.status(400).json({ error: 'language and level are required' });
-    }
-
-    try {
-        const user = await User.findById(req.userId);
-
-        // Enforce pod join limit
-        const canJoin = await canJoinPod(user);
-        if (!canJoin) {
-            return res.status(403).json({
-                error: 'Pod limit reached for your tier',
-                currentTier: user.subscriptionTier
-            });
-        }
-
-        // Already in a pod for this language?
-        const alreadyIn = await Pod.findOne({
-            language,
-            isActive: true,
-            'members.userId': user._id
-        });
-        if (alreadyIn) {
-            return res.json({ matched: false, pod: alreadyIn, reason: 'already_in_pod' });
-        }
-
-        // Find a pod with space, same language + level + timezone
-        const now = new Date();
-        const candidatePod = await Pod.findOneAndUpdate(
-            {
-                language,
-                level,
-                timezone: timezone || 'Africa/Lagos',
-                isActive: true,
-                isAutoMatched: true,
-                $expr: { $lt: [{ $size: '$members' }, '$maxMembers'] }
-            },
-            {
-                $push: { members: { userId: user._id, role: 'member' } }
-            },
-            { new: true, sort: { createdAt: 1 } }
-        );
-
-        if (candidatePod) {
-            user.podsJoined = (user.podsJoined || 0) + 1;
-            await user.save();
-
-            await Notification.create({
-                userId: user._id,
-                type: 'pod_milestone',
-                podId: candidatePod._id,
-                content: `You were matched into "${candidatePod.name}"`
-            });
-
-            return res.json({ matched: true, pod: candidatePod, created: false });
-        }
-
-        // No pod available → create one and put user as leader
-        const newPod = await Pod.create({
-            name: `${language} ${level} pod`,
-            description: 'Auto-generated pod',
-            language,
-            level,
-            timezone: timezone || 'Africa/Lagos',
-            creatorId: user._id,
-            isAutoMatched: true,
-            members: [{ userId: user._id, role: 'leader' }]
-        });
-
-        user.podsJoined = (user.podsJoined || 0) + 1;
-        await user.save();
-
-        res.status(201).json({ matched: true, pod: newPod, created: true });
-    } catch (error) {
-        console.error('Pod match error:', error);
         res.status(400).json({ error: error.message });
     }
 });

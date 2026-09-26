@@ -11,7 +11,6 @@ const router = express.Router();
 
 /**
  * GET /api/pairs
- * List current user's active pairs
  */
 router.get('/', authenticateUser, async (req, res) => {
     try {
@@ -32,7 +31,6 @@ router.get('/', authenticateUser, async (req, res) => {
 
 /**
  * POST /api/pairs/request
- * Request a specific partner by ID
  */
 router.post('/request', authenticateUser, async (req, res) => {
     const { targetUserId, languageA, languageB } = req.body;
@@ -99,14 +97,7 @@ router.post('/request', authenticateUser, async (req, res) => {
 
 /**
  * POST /api/pairs/match
- * Auto-match the current user with an ideal language exchange partner.
- *
- * Logic:
- *   1. Read my learningLanguages + teachingLanguages (or accept overrides)
- *   2. Find users who teach what I learn AND learn what I teach
- *   3. Exclude banned users, inactive users, and anyone I'm already paired with
- *   4. Rank by language overlap, primary language match, recency of activity
- *   5. Create an active pair and notify both sides
+ * Auto-match with timezone + premium priority
  */
 router.post('/match', authenticateUser, async (req, res) => {
     const {
@@ -120,10 +111,14 @@ router.post('/match', authenticateUser, async (req, res) => {
         if (!me) return res.status(404).json({ error: 'User not found' });
         if (me.isBanned) return res.status(403).json({ error: 'Account is banned' });
 
+        if (typeof timezoneOffsetMinutes === 'number') {
+            me.timezoneOffsetMinutes = timezoneOffsetMinutes;
+            await me.save();
+        }
+
         const myLearning = Array.isArray(languageLearning) && languageLearning.length
             ? languageLearning
             : me.learningLanguages || [];
-
         const myTeaching = Array.isArray(languageTeaching) && languageTeaching.length
             ? languageTeaching
             : me.teachingLanguages || [];
@@ -134,7 +129,6 @@ router.post('/match', authenticateUser, async (req, res) => {
             });
         }
 
-        // Enforce tier pair limit
         const canPair = await canCreatePair(me);
         if (!canPair) {
             return res.status(403).json({
@@ -143,7 +137,6 @@ router.post('/match', authenticateUser, async (req, res) => {
             });
         }
 
-        // Exclude anyone I'm already paired with (pending or active)
         const existingPairs = await Pair.find({
             status: { $in: ['pending', 'active'] },
             $or: [{ userA: me._id }, { userB: me._id }]
@@ -156,11 +149,6 @@ router.post('/match', authenticateUser, async (req, res) => {
         });
         alreadyPairedWith.add(me._id.toString());
 
-        // Find candidates:
-        //   - they teach at least one of the languages I'm learning
-        //   - they learn at least one of the languages I teach
-        //   - they're not banned or inactive
-        //   - they're not already paired with me
         const candidates = await User.find({
             _id: { $nin: Array.from(alreadyPairedWith) },
             isBanned: false,
@@ -168,8 +156,8 @@ router.post('/match', authenticateUser, async (req, res) => {
             teachingLanguages: { $in: myLearning },
             learningLanguages: { $in: myTeaching }
         })
-            .limit(20)
-            .select('fullName username avatarUrl learningLanguages teachingLanguages language lastActive lastSeen');
+            .limit(40)
+            .select('fullName username avatarUrl learningLanguages teachingLanguages language lastActive lastSeen subscriptionTier subscriptionExpires timezoneOffsetMinutes');
 
         if (candidates.length === 0) {
             return res.status(404).json({
@@ -178,23 +166,41 @@ router.post('/match', authenticateUser, async (req, res) => {
             });
         }
 
-        // Rank candidates:
-        //   +3 per shared language overlap (learning↔teaching)
-        //   +2 if same primary language
-        //   +1 if recently active (last 7 days)
-        const sevenDaysAgo = Date.now() - 7 * 24 * 60 * 60 * 1000;
+        const now = Date.now();
+        const oneDayAgo = now - 24 * 60 * 60 * 1000;
+        const sevenDaysAgo = now - 7 * 24 * 60 * 60 * 1000;
+
+        const myLimits = getUserLimits(me);
+        const isPremiumMe = myLimits.voice || myLimits.video;
+        const myTz = typeof me.timezoneOffsetMinutes === 'number'
+            ? me.timezoneOffsetMinutes
+            : (typeof timezoneOffsetMinutes === 'number' ? timezoneOffsetMinutes : null);
 
         const scored = candidates.map(c => {
             let score = 0;
+
             const sharedLearning = (c.teachingLanguages || []).filter(l => myLearning.includes(l));
             const sharedTeaching = (c.learningLanguages || []).filter(l => myTeaching.includes(l));
-            score += (sharedLearning.length + sharedTeaching.length) * 3;
+            score += (sharedLearning.length + sharedTeaching.length) * 10;
 
-            if (c.language && c.language === me.language) score += 2;
+            if (c.language && c.language === me.language) score += 5;
 
-            const lastActiveMs = c.lastActive ? new Date(c.lastActive).getTime()
+            if (myTz != null && typeof c.timezoneOffsetMinutes === 'number') {
+                const diff = Math.abs(c.timezoneOffsetMinutes - myTz);
+                if (diff <= 60) score += 15;
+                else if (diff <= 180) score += 8;
+                else if (diff <= 360) score += 3;
+            }
+
+            const lastMs = c.lastActive ? new Date(c.lastActive).getTime()
                 : (c.lastSeen ? new Date(c.lastSeen).getTime() : 0);
-            if (lastActiveMs > sevenDaysAgo) score += 1;
+            if (lastMs > oneDayAgo) score += 10;
+            else if (lastMs > sevenDaysAgo) score += 5;
+
+            if (isPremiumMe && c.subscriptionTier !== 'free') {
+                const stillActive = !c.subscriptionExpires || new Date(c.subscriptionExpires) > new Date();
+                if (stillActive) score += 8;
+            }
 
             return { candidate: c, score, sharedLearning, sharedTeaching };
         }).sort((a, b) => b.score - a.score);
@@ -202,11 +208,8 @@ router.post('/match', authenticateUser, async (req, res) => {
         const best = scored[0];
         const target = best.candidate;
 
-        // Pick the concrete language pair to store
         const languageA = best.sharedLearning[0] || myLearning[0];
         const languageB = best.sharedTeaching[0] || myTeaching[0];
-
-        const limits = getUserLimits(me);
 
         const pair = await Pair.create({
             userA: me._id,
@@ -214,8 +217,8 @@ router.post('/match', authenticateUser, async (req, res) => {
             languageA,
             languageB,
             status: 'active',
-            voiceEnabled: limits.voice,
-            videoEnabled: limits.video,
+            voiceEnabled: myLimits.voice,
+            videoEnabled: myLimits.video,
             matchedAt: new Date(),
             lastActivityAt: new Date()
         });
@@ -223,7 +226,6 @@ router.post('/match', authenticateUser, async (req, res) => {
         await User.findByIdAndUpdate(me._id, { $inc: { activePairs: 1 } });
         await User.findByIdAndUpdate(target._id, { $inc: { activePairs: 1 } });
 
-        // Notify both sides
         await Notification.insertMany([
             {
                 userId: target._id,
@@ -265,7 +267,6 @@ router.post('/match', authenticateUser, async (req, res) => {
 
 /**
  * POST /api/pairs/:pairId/accept
- * Accept a pending pair request
  */
 router.post('/:pairId/accept', authenticateUser, async (req, res) => {
     const { pairId } = req.params;
@@ -298,7 +299,6 @@ router.post('/:pairId/accept', authenticateUser, async (req, res) => {
 
 /**
  * DELETE /api/pairs/:pairId
- * End a pair (either user can end)
  */
 router.delete('/:pairId', authenticateUser, async (req, res) => {
     const { pairId } = req.params;
@@ -338,7 +338,6 @@ router.delete('/:pairId', authenticateUser, async (req, res) => {
 
 /**
  * GET /api/pairs/:pairId/messages
- * Fetch pair chat history
  */
 router.get('/:pairId/messages', authenticateUser, async (req, res) => {
     const { pairId } = req.params;
@@ -371,7 +370,6 @@ router.get('/:pairId/messages', authenticateUser, async (req, res) => {
 
 /**
  * POST /api/pairs/:pairId/messages
- * Send a pair message (moderated)
  */
 router.post('/:pairId/messages', authenticateUser, moderationMiddleware, async (req, res) => {
     const { pairId } = req.params;
@@ -403,6 +401,83 @@ router.post('/:pairId/messages', authenticateUser, moderationMiddleware, async (
         res.status(201).json(message);
     } catch (error) {
         console.error('Send pair message error:', error);
+        res.status(400).json({ error: error.message });
+    }
+});
+
+/**
+ * POST /api/pairs/:pairId/call/start
+ * Session gate for voice/video calls
+ */
+router.post('/:pairId/call/start', authenticateUser, async (req, res) => {
+    const { pairId } = req.params;
+    const { type } = req.body;
+
+    if (!['voice', 'video'].includes(type)) {
+        return res.status(400).json({ error: 'type must be "voice" or "video"' });
+    }
+
+    try {
+        const pair = await Pair.findById(pairId);
+        if (!pair) return res.status(404).json({ error: 'Pair not found' });
+
+        if (pair.status !== 'active') {
+            return res.status(400).json({ error: 'Pair is not active' });
+        }
+
+        if (pair.userA.toString() !== req.userId && pair.userB.toString() !== req.userId) {
+            return res.status(403).json({ error: 'Not part of this pair' });
+        }
+
+        const user = await User.findById(req.userId);
+        if (!user) return res.status(404).json({ error: 'User not found' });
+
+        const limits = getUserLimits(user);
+
+        if (type === 'voice' && !limits.voice) {
+            return res.status(403).json({
+                error: 'Voice calls require Premium or Immersive',
+                currentTier: user.subscriptionTier,
+                upgradeUrl: '/subscription'
+            });
+        }
+
+        if (type === 'video' && !limits.video) {
+            return res.status(403).json({
+                error: 'Video calls require Immersive',
+                currentTier: user.subscriptionTier,
+                upgradeUrl: '/subscription'
+            });
+        }
+
+        const partnerId = pair.userA.toString() === req.userId ? pair.userB : pair.userA;
+        const partner = await User.findById(partnerId);
+        if (!partner) return res.status(404).json({ error: 'Partner not found' });
+
+        const partnerLimits = getUserLimits(partner);
+
+        if (type === 'voice' && !partnerLimits.voice) {
+            return res.status(403).json({
+                error: 'Your partner does not have voice calls enabled on their tier'
+            });
+        }
+
+        if (type === 'video' && !partnerLimits.video) {
+            return res.status(403).json({
+                error: 'Your partner does not have video calls enabled on their tier'
+            });
+        }
+
+        res.json({
+            success: true,
+            type,
+            pairId,
+            partnerId,
+            canStart: true
+        });
+
+    } catch (error) {
+        console.error('Call start error:', error);
         res.status(400).json({ error: error.message });
     }
 });

@@ -4,18 +4,9 @@ import User from '../models/User.js';
 import Progress from '../models/Progress.js';
 import UsageCounter from '../models/UsageCounter.js';
 import { authenticateUser } from '../middleware/auth.js';
-import { getUserLimits } from '../middleware/tierGate.js';
+import { getUserLimits, CHAT_LIMITS } from '../middleware/tierGate.js';
 
 const router = express.Router();
-
-// ============================================
-// TIER LIMITS
-// ============================================
-const CHAT_LIMITS = {
-    free: 50,
-    premium: 500,
-    immersive: Infinity
-};
 
 // ============================================
 // HELPERS
@@ -154,8 +145,7 @@ async function recordUsage(user, key, limit, dateKey) {
 
 // ============================================
 // POST /api/ai/chat
-// Timmy AI chat — MOVED from /api/tts/generate
-// Drop-in replacement: same body { prompt }
+// Timmy AI chat — tier-gated
 // ============================================
 router.post('/chat', authenticateUser, async (req, res) => {
     try {
@@ -301,7 +291,6 @@ router.post('/custom-lesson', authenticateUser, async (req, res) => {
 
 // ============================================
 // GET /api/ai/usage
-// Aggregated usage across all AI features
 // ============================================
 router.get('/usage', authenticateUser, async (req, res) => {
     try {

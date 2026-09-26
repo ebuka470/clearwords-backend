@@ -26,6 +26,7 @@ const UserSchema = new mongoose.Schema({
         enum: ['yoruba', 'hausa', 'igbo', 'urhobo', 'itsekiri', 'pidgin'],
         default: 'yoruba'
     },
+    timezoneOffsetMinutes: { type: Number, default: null },
     learningLanguages: [{ type: String }],
     teachingLanguages: [{ type: String }],
     subscriptionTier: {

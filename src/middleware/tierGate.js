@@ -32,6 +32,20 @@ export const TIER_LIMITS = {
     }
 };
 
+// AI chat daily limits
+export const CHAT_LIMITS = {
+    free: 200,
+    premium: Infinity,
+    immersive: Infinity
+};
+
+// TTS audio daily limits
+export const TTS_LIMITS = {
+    free: 30,
+    premium: 300,
+    immersive: Infinity
+};
+
 export function getUserLimits(user) {
     if (user.subscriptionExpires && new Date(user.subscriptionExpires) < new Date()) {
         return TIER_LIMITS.free;

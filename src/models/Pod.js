@@ -18,14 +18,17 @@ const PodSchema = new mongoose.Schema({
         role: { type: String, enum: ['member', 'leader'], default: 'member' }
     }],
 
+    formerMembers: [{
+        userId: { type: mongoose.Schema.Types.ObjectId, ref: 'User' },
+        leftAt: { type: Date, default: Date.now }
+    }],
+
     maxMembers: { type: Number, default: 8, min: 5, max: 8 },
 
-    // Weekly accountability
     weeklyGoal: { type: Number, default: 5 },
     sharedStreak: { type: Number, default: 0 },
     lastStreakCheck: { type: Date, default: null },
 
-    // Pod leaderboard
     weeklyXP: { type: Number, default: 0 },
     totalXP: { type: Number, default: 0 },
 
@@ -39,7 +42,7 @@ const PodSchema = new mongoose.Schema({
 PodSchema.index({ language: 1, level: 1, isActive: 1 });
 PodSchema.index({ 'members.userId': 1 });
 
-PodSchema.pre('save', function(next) {
+PodSchema.pre('save', function (next) {
     if (!this.inviteCode) {
         this.inviteCode = 'POD-' + Math.random().toString(36).substring(2, 8).toUpperCase();
     }

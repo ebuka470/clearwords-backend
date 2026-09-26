@@ -3,15 +3,9 @@ import axios from 'axios';
 import User from '../models/User.js';
 import UsageCounter from '../models/UsageCounter.js';
 import { authenticateUser } from '../middleware/auth.js';
+import { TTS_LIMITS } from '../middleware/tierGate.js';
 
 const router = express.Router();
-
-// TTS audio daily limits
-const TTS_LIMITS = {
-    free: 30,
-    premium: 300,
-    immersive: Infinity
-};
 
 function getDateKey(timezoneOffsetMinutes) {
     const now = new Date();

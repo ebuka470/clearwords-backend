@@ -9,8 +9,6 @@ const router = express.Router();
 
 /**
  * GET /api/auth/config
- * Public Auth0 configuration for the frontend.
- * Only exposes public values — never secrets.
  */
 router.get('/config', (req, res) => {
     const {
@@ -37,8 +35,6 @@ router.get('/config', (req, res) => {
 
 /**
  * POST /api/auth/signup
- * Create user after Auth0 signup.
- * Optionally accepts a referralCode to credit the referrer.
  */
 router.post('/signup', async (req, res) => {
     const {
@@ -61,7 +57,6 @@ router.post('/signup', async (req, res) => {
             return res.status(409).json({ error: 'User already exists', user });
         }
 
-        // Create the user
         user = await User.create({
             auth0Id,
             email,
@@ -71,7 +66,6 @@ router.post('/signup', async (req, res) => {
             language: language || 'yoruba'
         });
 
-        // Create initial progress record
         await Progress.create({
             userId: user._id,
             language: language || 'yoruba',
@@ -82,9 +76,6 @@ router.post('/signup', async (req, res) => {
             currentLevel: 1
         });
 
-        // ============================================
-        // REFERRAL REDEMPTION (non-fatal)
-        // ============================================
         let referralResult = null;
         if (referralCode) {
             try {
@@ -159,7 +150,6 @@ router.post('/signup', async (req, res) => {
 
 /**
  * GET /api/auth/me
- * Get current user info from JWT
  */
 router.get('/me', async (req, res) => {
     const authHeader = req.headers.authorization;
@@ -180,7 +170,6 @@ router.get('/me', async (req, res) => {
             return res.status(404).json({ error: 'User not found' });
         }
 
-        // Refresh activity timestamps
         user.lastActive = new Date();
         user.lastSeen = new Date();
         await user.save();
@@ -193,6 +182,7 @@ router.get('/me', async (req, res) => {
             phone: user.phone,
             segment: user.segment,
             language: user.language,
+            timezoneOffsetMinutes: user.timezoneOffsetMinutes,
             learningLanguages: user.learningLanguages || [],
             teachingLanguages: user.teachingLanguages || [],
             subscriptionTier: user.subscriptionTier,
@@ -225,9 +215,7 @@ router.get('/me', async (req, res) => {
 
 /**
  * POST /api/auth/test-token
- * DEV ONLY — never enabled in production.
- * Creates a user if needed and returns a signed JWT.
- * Used by the test suite to bypass Auth0.
+ * DEV ONLY
  */
 if (process.env.NODE_ENV !== 'production') {
     router.post('/test-token', async (req, res) => {

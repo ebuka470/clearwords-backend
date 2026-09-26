@@ -3,24 +3,23 @@ import crypto from 'crypto';
 import User from '../models/User.js';
 import Subscription from '../models/Subscription.js';
 import Notification from '../models/Notification.js';
+import Pair from '../models/Pair.js';
 import { authenticateUser } from '../middleware/auth.js';
-import { TIER_LIMITS, getUserLimits } from '../middleware/tierGate.js';
+import { TIER_LIMITS, CHAT_LIMITS, TTS_LIMITS, getUserLimits } from '../middleware/tierGate.js';
 
 const router = express.Router();
 
 // ============================================
 // CONFIG
 // ============================================
-
 const TIER_PRICES = {
-    // Amounts in kobo (Paystack uses smallest currency unit)
     premium: {
-        NGN: { monthly: 250000, yearly: 2500000 },   // ₦2,500 / ₦25,000
-        USD: { monthly: 500,    yearly: 5000 }        // $5 / $50 (cents)
+        NGN: { monthly: 250000, yearly: 2500000 },
+        USD: { monthly: 500, yearly: 5000 }
     },
     immersive: {
-        NGN: { monthly: 500000, yearly: 5000000 },   // ₦5,000 / ₦50,000
-        USD: { monthly: 1000,   yearly: 10000 }       // $10 / $100
+        NGN: { monthly: 500000, yearly: 5000000 },
+        USD: { monthly: 1000, yearly: 10000 }
     }
 };
 
@@ -28,6 +27,29 @@ const TIER_DURATION_DAYS = {
     monthly: 30,
     yearly: 365
 };
+
+// ============================================
+// SYNC PAIR VOICE/VIDEO FLAGS ON TIER CHANGE
+// ============================================
+async function syncPairFlags(userId) {
+    try {
+        const user = await User.findById(userId);
+        if (!user) return;
+        const limits = getUserLimits(user);
+        await Pair.updateMany(
+            {
+                $or: [{ userA: user._id }, { userB: user._id }],
+                status: 'active'
+            },
+            {
+                voiceEnabled: !!limits.voice,
+                videoEnabled: !!limits.video
+            }
+        );
+    } catch (err) {
+        console.error('syncPairFlags error:', err.message);
+    }
+}
 
 // ============================================
 // GET /api/subscription
@@ -56,20 +78,25 @@ router.get('/', authenticateUser, async (req, res) => {
 
 // ============================================
 // GET /api/subscription/plans
-// Public — returns tier comparison + prices
 // ============================================
 router.get('/plans', (req, res) => {
     res.json({
         free: {
             ...TIER_LIMITS.free,
+            chatLimit: CHAT_LIMITS.free,
+            ttsLimit: TTS_LIMITS.free,
             prices: null
         },
         premium: {
             ...TIER_LIMITS.premium,
+            chatLimit: CHAT_LIMITS.premium,
+            ttsLimit: TTS_LIMITS.premium,
             prices: TIER_PRICES.premium
         },
         immersive: {
             ...TIER_LIMITS.immersive,
+            chatLimit: CHAT_LIMITS.immersive,
+            ttsLimit: TTS_LIMITS.immersive,
             prices: TIER_PRICES.immersive
         }
     });
@@ -77,8 +104,6 @@ router.get('/plans', (req, res) => {
 
 // ============================================
 // POST /api/subscription/initialize
-// Called by the frontend before opening Paystack popup
-// Returns the reference + amount to charge
 // ============================================
 router.post('/initialize', authenticateUser, async (req, res) => {
     const { tier, billingCycle = 'monthly', currency = 'NGN' } = req.body;
@@ -125,8 +150,6 @@ router.post('/initialize', authenticateUser, async (req, res) => {
 
 // ============================================
 // POST /api/subscription/verify/:reference
-// Called by the frontend after Paystack succeeds
-// Confirms the payment and activates the tier
 // ============================================
 router.post('/verify/:reference', authenticateUser, async (req, res) => {
     const { reference } = req.params;
@@ -141,9 +164,7 @@ router.post('/verify/:reference', authenticateUser, async (req, res) => {
             `https://api.paystack.co/transaction/verify/${reference}`,
             {
                 method: 'GET',
-                headers: {
-                    Authorization: `Bearer ${secret}`
-                }
+                headers: { Authorization: `Bearer ${secret}` }
             }
         );
 
@@ -172,7 +193,6 @@ router.post('/verify/:reference', authenticateUser, async (req, res) => {
             return res.status(400).json({ error: 'Invalid tier in metadata' });
         }
 
-        // Idempotency: if we already recorded this reference, just return
         const existing = await Subscription.findOne({ providerSubscriptionId: reference });
         if (existing && existing.status === 'active') {
             const user = await User.findById(userId);
@@ -188,7 +208,6 @@ router.post('/verify/:reference', authenticateUser, async (req, res) => {
         const expires = new Date();
         expires.setDate(expires.getDate() + days);
 
-        // Activate on user
         const user = await User.findByIdAndUpdate(
             userId,
             {
@@ -199,7 +218,6 @@ router.post('/verify/:reference', authenticateUser, async (req, res) => {
             { new: true }
         );
 
-        // Record subscription
         await Subscription.create({
             userId,
             tier,
@@ -214,7 +232,9 @@ router.post('/verify/:reference', authenticateUser, async (req, res) => {
             paymentMethod: tx.channel || null
         });
 
-        // Notify
+        // Sync pair voice/video flags
+        await syncPairFlags(userId);
+
         await Notification.create({
             userId,
             type: 'subscription_activated',
@@ -234,7 +254,7 @@ router.post('/verify/:reference', authenticateUser, async (req, res) => {
 
 // ============================================
 // POST /api/subscription/update
-// Admin override (keep for internal use only)
+// Admin override
 // ============================================
 router.post('/update', async (req, res) => {
     const { userId, tier, expires, customerCode, subscriptionId } = req.body;
@@ -267,6 +287,9 @@ router.post('/update', async (req, res) => {
             endDate: expires || null
         });
 
+        // Sync pair voice/video flags
+        await syncPairFlags(userId);
+
         res.json({ success: true, user: { id: user._id, subscriptionTier: user.subscriptionTier } });
     } catch (error) {
         console.error('Update subscription error:', error);
@@ -277,7 +300,6 @@ router.post('/update', async (req, res) => {
 // ============================================
 // POST /api/subscription/webhook
 // Paystack webhook — must receive RAW body
-// (see index.js for the correct mounting order)
 // ============================================
 export async function paystackWebhookHandler(req, res) {
     const secret = process.env.PAYSTACK_SECRET_KEY;
@@ -286,7 +308,6 @@ export async function paystackWebhookHandler(req, res) {
         return res.status(500).send('Webhook not configured');
     }
 
-    // Verify signature using the raw body
     const rawBody = req.rawBody || JSON.stringify(req.body);
     const hash = crypto
         .createHmac('sha512', secret)
@@ -313,7 +334,6 @@ export async function paystackWebhookHandler(req, res) {
                     break;
                 }
 
-                // Idempotency
                 const existing = await Subscription.findOne({ providerSubscriptionId: reference });
                 if (existing && existing.status === 'active') {
                     console.log(`Webhook: reference ${reference} already processed`);
@@ -344,6 +364,9 @@ export async function paystackWebhookHandler(req, res) {
                     paymentMethod: channel || null
                 });
 
+                // Sync pair voice/video flags
+                await syncPairFlags(userId);
+
                 await Notification.create({
                     userId,
                     type: 'subscription_activated',
@@ -366,6 +389,8 @@ export async function paystackWebhookHandler(req, res) {
                 );
 
                 if (user) {
+                    await syncPairFlags(user._id);
+
                     await Notification.create({
                         userId: user._id,
                         type: 'subscription_ended',

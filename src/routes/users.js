@@ -32,6 +32,7 @@ router.get('/:identifier', async (req, res) => {
             isPublic: user.isPublic,
             segment: user.segment,
             language: user.language,
+            timezoneOffsetMinutes: user.timezoneOffsetMinutes,
             learningLanguages: user.learningLanguages,
             teachingLanguages: user.teachingLanguages,
             subscriptionTier: user.subscriptionTier,
@@ -52,7 +53,8 @@ router.get('/:identifier', async (req, res) => {
 router.put('/profile', authenticateUser, async (req, res) => {
     const {
         fullName, username, bio, location, language, segment,
-        isPublic, learningLanguages, teachingLanguages
+        isPublic, learningLanguages, teachingLanguages,
+        timezoneOffsetMinutes
     } = req.body;
 
     try {
@@ -74,6 +76,7 @@ router.put('/profile', authenticateUser, async (req, res) => {
 
         if (Array.isArray(learningLanguages)) user.learningLanguages = learningLanguages;
         if (Array.isArray(teachingLanguages)) user.teachingLanguages = teachingLanguages;
+        if (typeof timezoneOffsetMinutes === 'number') user.timezoneOffsetMinutes = timezoneOffsetMinutes;
 
         await user.save();
 
@@ -89,7 +92,8 @@ router.put('/profile', authenticateUser, async (req, res) => {
             segment: user.segment,
             isPublic: user.isPublic,
             learningLanguages: user.learningLanguages,
-            teachingLanguages: user.teachingLanguages
+            teachingLanguages: user.teachingLanguages,
+            timezoneOffsetMinutes: user.timezoneOffsetMinutes
         });
     } catch (error) {
         console.error('Update profile error:', error);
