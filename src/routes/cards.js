@@ -1,8 +1,9 @@
 import express from 'express';
 import ProgressCard from '../models/ProgressCard.js';
 import User from '../models/User.js';
+import Pod from '../models/Pod.js';
 import { authenticateUser } from '../middleware/auth.js';
-import { saveCardSVG, CARDS_DIR } from '../utils/cardRenderer.js';
+import { saveCardSVG } from '../utils/cardRenderer.js';
 
 const router = express.Router();
 
@@ -19,6 +20,7 @@ router.post('/', authenticateUser, async (req, res) => {
 
     try {
         const user = await User.findById(req.userId);
+        if (!user) return res.status(404).json({ error: 'User not found' });
 
         const card = await ProgressCard.create({
             userId: user._id,
@@ -70,7 +72,6 @@ router.post('/:cardId/render', authenticateUser, async (req, res) => {
         res.json({
             success: true,
             imageUrl,
-            // Full URL for sharing
             fullUrl: `${req.protocol}://${req.get('host')}${imageUrl}`
         });
     } catch (error) {
@@ -96,6 +97,8 @@ router.get('/mine', authenticateUser, async (req, res) => {
 
 /**
  * POST /api/cards/:cardId/share/pod/:podId
+ * Share a card inside a pod.
+ * Requires the caller to be a member of that pod.
  */
 router.post('/:cardId/share/pod/:podId', authenticateUser, async (req, res) => {
     const { cardId, podId } = req.params;
@@ -103,6 +106,24 @@ router.post('/:cardId/share/pod/:podId', authenticateUser, async (req, res) => {
     try {
         const card = await ProgressCard.findOne({ _id: cardId, userId: req.userId });
         if (!card) return res.status(404).json({ error: 'Card not found' });
+
+        // Verify pod exists and caller is a member
+        const pod = await Pod.findById(podId);
+        if (!pod || !pod.isActive) {
+            return res.status(404).json({ error: 'Pod not found' });
+        }
+
+        const isMember = pod.members.some(m => m.userId.toString() === req.userId);
+        if (!isMember) {
+            return res.status(403).json({ error: 'You are not a member of this pod' });
+        }
+
+        // Only share to pods that match the card's language
+        if (pod.language !== card.language) {
+            return res.status(400).json({
+                error: `This card is for ${card.language}, but the pod is for ${pod.language}`
+            });
+        }
 
         if (!card.sharedInternally.some(id => id.toString() === podId)) {
             card.sharedInternally.push(podId);
@@ -126,7 +147,6 @@ router.post('/:cardId/share/external', authenticateUser, async (req, res) => {
         const card = await ProgressCard.findOne({ _id: cardId, userId: req.userId });
         if (!card) return res.status(404).json({ error: 'Card not found' });
 
-        // Auto-render if not rendered yet
         if (!card.rendered) {
             const { imageUrl, imagePath } = await saveCardSVG({
                 cardId: card._id.toString(),

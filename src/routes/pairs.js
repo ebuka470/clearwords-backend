@@ -10,6 +10,19 @@ import { canCreatePair, getUserLimits } from '../middleware/tierGate.js';
 const router = express.Router();
 
 /**
+ * Compute effective voice/video flags for a pair.
+ * Both users must have the entitlement for the pair to have it.
+ */
+function computePairFlags(userA, userB) {
+    const a = getUserLimits(userA);
+    const b = getUserLimits(userB);
+    return {
+        voiceEnabled: !!(a.voice && b.voice),
+        videoEnabled: !!(a.video && b.video)
+    };
+}
+
+/**
  * GET /api/pairs
  */
 router.get('/', authenticateUser, async (req, res) => {
@@ -66,7 +79,8 @@ router.post('/request', authenticateUser, async (req, res) => {
         });
         if (existing) return res.status(400).json({ error: 'Pair already exists' });
 
-        const limits = getUserLimits(user);
+        // Effective flags = AND of both users' entitlements
+        const flags = computePairFlags(user, target);
 
         const pair = await Pair.create({
             userA: req.userId,
@@ -74,8 +88,7 @@ router.post('/request', authenticateUser, async (req, res) => {
             languageA,
             languageB,
             status: 'pending',
-            voiceEnabled: limits.voice,
-            videoEnabled: limits.video
+            ...flags
         });
 
         await Notification.create({
@@ -97,14 +110,9 @@ router.post('/request', authenticateUser, async (req, res) => {
 
 /**
  * POST /api/pairs/match
- * Auto-match with timezone + premium priority
  */
 router.post('/match', authenticateUser, async (req, res) => {
-    const {
-        languageLearning,
-        languageTeaching,
-        timezoneOffsetMinutes
-    } = req.body || {};
+    const { languageLearning, languageTeaching, timezoneOffsetMinutes } = req.body || {};
 
     try {
         const me = await User.findById(req.userId);
@@ -211,14 +219,16 @@ router.post('/match', authenticateUser, async (req, res) => {
         const languageA = best.sharedLearning[0] || myLearning[0];
         const languageB = best.sharedTeaching[0] || myTeaching[0];
 
+        // Effective flags = AND of both users
+        const flags = computePairFlags(me, target);
+
         const pair = await Pair.create({
             userA: me._id,
             userB: target._id,
             languageA,
             languageB,
             status: 'active',
-            voiceEnabled: myLimits.voice,
-            videoEnabled: myLimits.video,
+            ...flags,
             matchedAt: new Date(),
             lastActivityAt: new Date()
         });
@@ -281,6 +291,15 @@ router.post('/:pairId/accept', authenticateUser, async (req, res) => {
 
         if (pair.status !== 'pending') {
             return res.status(400).json({ error: 'Pair is not pending' });
+        }
+
+        // Recompute flags on accept (in case a tier changed between request and accept)
+        const userA = await User.findById(pair.userA);
+        const userB = await User.findById(pair.userB);
+        if (userA && userB) {
+            const flags = computePairFlags(userA, userB);
+            pair.voiceEnabled = flags.voiceEnabled;
+            pair.videoEnabled = flags.videoEnabled;
         }
 
         pair.status = 'active';
@@ -407,7 +426,6 @@ router.post('/:pairId/messages', authenticateUser, moderationMiddleware, async (
 
 /**
  * POST /api/pairs/:pairId/call/start
- * Session gate for voice/video calls
  */
 router.post('/:pairId/call/start', authenticateUser, async (req, res) => {
     const { pairId } = req.params;

@@ -1,4 +1,8 @@
 import express from 'express';
+import fs from 'fs';
+import path from 'path';
+import { fileURLToPath } from 'url';
+import { dirname } from 'path';
 import Progress from '../models/Progress.js';
 import User from '../models/User.js';
 import LessonCompletion from '../models/LessonCompletion.js';
@@ -10,9 +14,79 @@ import { autoApplyFreezeIfNeeded, grantWeeklyFreezeIfEligible } from './streak.j
 
 const router = express.Router();
 
+// ============================================
+// CURRICULUM CACHE (for XP + level completion)
+// ============================================
+const __filename = fileURLToPath(import.meta.url);
+const __dirname = dirname(__filename);
+const DATA_DIR = path.join(__dirname, '../data');
+
+const CURRICULUM = {};
+try {
+    if (fs.existsSync(DATA_DIR)) {
+        const files = fs.readdirSync(DATA_DIR);
+        files.forEach(file => {
+            if (file.endsWith('.json')) {
+                const lang = file.replace('.json', '');
+                try {
+                    CURRICULUM[lang] = JSON.parse(
+                        fs.readFileSync(path.join(DATA_DIR, file), 'utf8')
+                    );
+                } catch (err) {
+                    console.warn(`Failed to parse ${file}:`, err.message);
+                }
+            }
+        });
+    }
+} catch (err) {
+    console.warn('Curriculum load warning:', err.message);
+}
+
+/**
+ * Look up a lesson in the curriculum.
+ * Returns { lesson, level, totalLessonsInLevel } or null.
+ */
+function findLesson(language, levelId, lessonId) {
+    const lang = CURRICULUM[language];
+    if (!lang) return null;
+
+    const levels = lang.levels || lang.curriculum?.levels || [];
+    const level = levels.find(l => Number(l.id) === Number(levelId));
+    if (!level) return null;
+
+    const lessons = level.lessons || [];
+    const lesson = lessons.find(l => String(l.id) === String(lessonId));
+    if (!lesson) return null;
+
+    return {
+        lesson,
+        level,
+        totalLessonsInLevel: lessons.length,
+        levelLessonIds: lessons.map(l => String(l.id))
+    };
+}
+
+/**
+ * Compute XP server-side. Never trust the client.
+ *   Base: 10 XP per lesson
+ *   Perfect bonus: +50%
+ *   Speed bonus: +20% if completed under 60s
+ *   Mistake penalty: -2 XP per mistake (min 5 XP)
+ */
+function computeXP({ perfect, timeSpentSeconds, mistakesCount, lesson }) {
+    let xp = lesson?.xpReward || 10;
+
+    if (perfect) xp = Math.round(xp * 1.5);
+    if (timeSpentSeconds > 0 && timeSpentSeconds < 60) xp = Math.round(xp * 1.2);
+
+    xp = Math.max(5, xp - (mistakesCount * 2));
+    xp = Math.min(xp, 200); // hard cap
+
+    return xp;
+}
+
 /**
  * GET /api/progress
- * Get user progress
  */
 router.get('/', authenticateUser, async (req, res) => {
     const { language } = req.query;
@@ -44,14 +118,13 @@ router.get('/', authenticateUser, async (req, res) => {
 
 /**
  * POST /api/progress/complete-lesson
- * Report a completed lesson. Updates streak, XP, lessons.
+ * Server computes XP. Client only reports performance metrics.
  */
 router.post('/complete-lesson', authenticateUser, async (req, res) => {
     const {
         language,
         levelId,
         lessonId,
-        xpEarned = 0,
         perfect = false,
         timeSpentSeconds = 0,
         mistakesCount = 0,
@@ -65,19 +138,37 @@ router.post('/complete-lesson', authenticateUser, async (req, res) => {
         });
     }
 
-    const safeXP = Math.min(Math.max(0, Number(xpEarned) || 0), 500);
     const safeLevel = Number(levelId);
     const safeTime = Math.min(Math.max(0, Number(timeSpentSeconds) || 0), 3600);
+    const safeMistakes = Math.min(Math.max(0, Number(mistakesCount) || 0), 100);
 
     try {
         const user = await User.findById(req.userId);
         if (!user) return res.status(404).json({ error: 'User not found' });
         if (user.isBanned) return res.status(403).json({ error: 'Account is banned' });
 
+        // Look up the lesson in the curriculum
+        const found = findLesson(language, safeLevel, lessonId);
+        if (!found) {
+            return res.status(404).json({
+                error: 'Lesson not found in curriculum',
+                language,
+                levelId: safeLevel,
+                lessonId
+            });
+        }
+
+        // Server-computed XP
+        const xpEarned = computeXP({
+            perfect,
+            timeSpentSeconds: safeTime,
+            mistakesCount: safeMistakes,
+            lesson: found.lesson
+        });
+
         // Auto-apply streak freeze if user missed exactly one day
         await autoApplyFreezeIfNeeded(req.userId, language);
 
-        // Find or create progress
         let progress = await Progress.findOne({ userId: req.userId, language });
         if (!progress) {
             progress = await Progress.create({
@@ -91,10 +182,8 @@ router.post('/complete-lesson', authenticateUser, async (req, res) => {
             });
         }
 
-        // Determine today's date key (user's timezone)
         const dateKey = getDateKey(timezoneOffsetMinutes);
 
-        // Check if lesson already completed
         const existing = await LessonCompletion.findOne({
             userId: req.userId,
             language,
@@ -106,10 +195,9 @@ router.post('/complete-lesson', authenticateUser, async (req, res) => {
 
         let completion;
         if (existing) {
-            // Re-completion: allow XP if improved, but don't re-award streak/daily
-            existing.xpEarned = Math.max(existing.xpEarned, safeXP);
+            existing.xpEarned = Math.max(existing.xpEarned, xpEarned);
             existing.perfect = existing.perfect || perfect;
-            existing.mistakesCount = Math.min(existing.mistakesCount, mistakesCount);
+            existing.mistakesCount = Math.min(existing.mistakesCount, safeMistakes);
             existing.completedAt = new Date();
             await existing.save();
             completion = existing;
@@ -119,16 +207,16 @@ router.post('/complete-lesson', authenticateUser, async (req, res) => {
                 language,
                 levelId: safeLevel,
                 lessonId,
-                xpEarned: safeXP,
+                xpEarned,
                 perfect,
                 timeSpentSeconds: safeTime,
-                mistakesCount,
+                mistakesCount: safeMistakes,
                 source
             });
         }
 
         // ============================================
-        // STREAK LOGIC (only on first completion of the day)
+        // STREAK (only on first completion of the day)
         // ============================================
         const isFirstLessonToday = progress.lastCompletedDate !== dateKey;
         let streakChanged = false;
@@ -140,7 +228,6 @@ router.post('/complete-lesson', authenticateUser, async (req, res) => {
             } else if (progress.lastCompletedDate === null) {
                 progress.streak = 1;
             } else {
-                // Streak was broken but auto-freeze should have handled it; if not, reset
                 progress.streak = 1;
             }
 
@@ -156,28 +243,52 @@ router.post('/complete-lesson', authenticateUser, async (req, res) => {
         // XP + LESSON TRACKING
         // ============================================
         if (isFirstTime) {
-            progress.totalXP += safeXP;
-            progress.weeklyXP += safeXP;
+            progress.totalXP += xpEarned;
+            progress.weeklyXP = (progress.weeklyXP || 0) + xpEarned;
 
             if (!progress.completedLessons.includes(lessonId)) {
                 progress.completedLessons.push(lessonId);
             }
 
-            if (perfect) progress.perfectScores += 1;
+            if (perfect) progress.perfectScores = (progress.perfectScores || 0) + 1;
 
             if (isFirstLessonToday) {
                 progress.dailyCompleted = 1;
                 progress.dailyDateKey = dateKey;
             } else {
-                progress.dailyCompleted += 1;
+                progress.dailyCompleted = (progress.dailyCompleted || 0) + 1;
             }
+        }
 
-            // Level completion
-            // (Simplified: if this is the last lesson of a level, mark it complete.
-            //  You can tighten this by checking the curriculum's lesson count.)
-            if (!progress.completedLevels.includes(safeLevel)) {
-                // Placeholder: mark level complete after the first lesson of that level
-                // Replace with a real check against the curriculum if desired
+        // ============================================
+        // LEVEL COMPLETION (real check against curriculum)
+        // ============================================
+        let levelCompleted = false;
+
+        if (!progress.completedLevels.includes(safeLevel)) {
+            // Count how many lessons of this level the user has completed
+            const completedInLevel = await LessonCompletion.countDocuments({
+                userId: req.userId,
+                language,
+                levelId: safeLevel,
+                lessonId: { $in: found.levelLessonIds }
+            });
+
+            if (completedInLevel >= found.totalLessonsInLevel && found.totalLessonsInLevel > 0) {
+                progress.completedLevels.push(safeLevel);
+                progress.currentLevel = Math.max(progress.currentLevel, safeLevel + 1);
+                levelCompleted = true;
+
+                // Award level completion bonus
+                const levelBonus = 50 + (safeLevel * 10);
+                progress.totalXP += levelBonus;
+
+                // Notify
+                await Notification.create({
+                    userId: req.userId,
+                    type: 'pod_milestone',
+                    content: `🎉 Level ${safeLevel} complete in ${language}! +${levelBonus} XP`
+                });
             }
         }
 
@@ -187,22 +298,17 @@ router.post('/complete-lesson', authenticateUser, async (req, res) => {
         await progress.save();
 
         // ============================================
-        // REFERRAL QUALIFICATION (first lesson ever)
+        // REFERRAL QUALIFICATION (first-ever lesson)
         // ============================================
-        if (isFirstTime) {
-            const totalLessons = progress.completedLessons.length;
-            if (totalLessons === 1) {
-                // This is the user's first lesson in this language
-                // If it's their first ever, qualify any pending referral
-                const anyOtherProgress = await Progress.findOne({
-                    userId: req.userId,
-                    language: { $ne: language },
-                    'completedLessons.0': { $exists: true }
-                });
+        if (isFirstTime && progress.completedLessons.length === 1) {
+            const anyOtherProgress = await Progress.findOne({
+                userId: req.userId,
+                language: { $ne: language },
+                'completedLessons.0': { $exists: true }
+            });
 
-                if (!anyOtherProgress) {
-                    await qualifyReferralForUser(req.userId);
-                }
+            if (!anyOtherProgress) {
+                await qualifyReferralForUser(req.userId);
             }
         }
 
@@ -221,15 +327,15 @@ router.post('/complete-lesson', authenticateUser, async (req, res) => {
         // ============================================
         // POD WEEKLY XP UPDATE
         // ============================================
-        if (isFirstTime && safeXP > 0) {
+        if (isFirstTime && xpEarned > 0) {
             const pods = await Pod.find({
                 'members.userId': req.userId,
                 language,
                 isActive: true
             });
             for (const pod of pods) {
-                pod.weeklyXP += safeXP;
-                pod.totalXP += safeXP;
+                pod.weeklyXP += xpEarned;
+                pod.totalXP += xpEarned;
                 await pod.save();
             }
         }
@@ -239,10 +345,11 @@ router.post('/complete-lesson', authenticateUser, async (req, res) => {
             completion: {
                 lessonId,
                 levelId: safeLevel,
-                xpEarned: isFirstTime ? safeXP : 0,
+                xpEarned: isFirstTime ? xpEarned : 0,
                 perfect,
                 firstTime: isFirstTime
             },
+            levelCompleted,
             progress: {
                 language,
                 streak: progress.streak,
@@ -250,6 +357,7 @@ router.post('/complete-lesson', authenticateUser, async (req, res) => {
                 totalXP: progress.totalXP,
                 currentLevel: progress.currentLevel,
                 completedLessons: progress.completedLessons.length,
+                completedLevels: progress.completedLevels,
                 dailyCompleted: progress.dailyCompleted,
                 lastCompletedDate: progress.lastCompletedDate
             },
@@ -264,7 +372,7 @@ router.post('/complete-lesson', authenticateUser, async (req, res) => {
 
 /**
  * POST /api/progress/sync
- * Legacy full sync (kept for compatibility)
+ * Legacy full sync
  */
 router.post('/sync', authenticateUser, async (req, res) => {
     const {
@@ -340,9 +448,6 @@ router.delete('/:language', authenticateUser, async (req, res) => {
     }
 });
 
-// ============================================
-// HELPERS
-// ============================================
 function getDateKey(timezoneOffsetMinutes, shiftMs = 0) {
     const now = new Date(Date.now() + shiftMs);
     if (typeof timezoneOffsetMinutes === 'number') {
