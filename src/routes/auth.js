@@ -4,6 +4,7 @@ import User from '../models/User.js';
 import Progress from '../models/Progress.js';
 import Referral from '../models/Referral.js';
 import Notification from '../models/Notification.js';
+import { authenticateUser } from '../middleware/auth.js';
 
 const router = express.Router();
 
@@ -150,67 +151,53 @@ router.post('/signup', async (req, res) => {
 
 /**
  * GET /api/auth/me
+ *
+ * Reuses the same authenticateUser middleware every other authenticated
+ * route relies on, instead of re-verifying the token by hand. The previous
+ * version of this route called jwt.verify(token, process.env.JWT_SECRET, ...)
+ * directly, which only checks HS256 — real Auth0-issued tokens are RS256
+ * (verified via JWKS), so logins from actual Auth0 Universal Login would
+ * fail here even though every other endpoint accepted the same token fine.
+ * authenticateUser already handles RS256 *and* HS256 (see
+ * src/middleware/auth.js), plus user lookup/auto-provisioning, the banned
+ * check, and the lastActive/lastSeen touch — so this handler now just
+ * shapes the response from req.user.
  */
-router.get('/me', async (req, res) => {
-    const authHeader = req.headers.authorization;
-    if (!authHeader || !authHeader.startsWith('Bearer ')) {
-        return res.status(401).json({ error: 'Missing authorization header' });
-    }
+router.get('/me', authenticateUser, async (req, res) => {
+    const user = req.user;
 
-    const token = authHeader.split(' ')[1];
-
-    try {
-        const decoded = jwt.verify(token, process.env.JWT_SECRET, {
-            audience: process.env.AUTH0_AUDIENCE,
-            issuer: `https://${process.env.AUTH0_DOMAIN}/`
-        });
-
-        const user = await User.findOne({ auth0Id: decoded.sub });
-        if (!user) {
-            return res.status(404).json({ error: 'User not found' });
-        }
-
-        user.lastActive = new Date();
-        user.lastSeen = new Date();
-        await user.save();
-
-        res.json({
-            id: user._id,
-            auth0Id: user.auth0Id,
-            email: user.email,
-            fullName: user.fullName,
-            phone: user.phone,
-            segment: user.segment,
-            language: user.language,
-            timezoneOffsetMinutes: user.timezoneOffsetMinutes,
-            learningLanguages: user.learningLanguages || [],
-            teachingLanguages: user.teachingLanguages || [],
-            subscriptionTier: user.subscriptionTier,
-            subscriptionExpires: user.subscriptionExpires,
-            referralCode: user.referralCode,
-            referralCount: user.referralCount || 0,
-            pendingReferrals: user.pendingReferrals || 0,
-            referralsRewarded: user.referralsRewarded || 0,
-            referredBy: user.referredBy,
-            streakFreezesAvailable: user.streakFreezesAvailable || 0,
-            avatarUrl: user.avatarUrl,
-            coverPhotoUrl: user.coverPhotoUrl,
-            username: user.username,
-            bio: user.bio,
-            location: user.location,
-            isPublic: user.isPublic,
-            isVerified: user.isVerified,
-            podsJoined: user.podsJoined || 0,
-            activePairs: user.activePairs || 0,
-            cardsShared: user.cardsShared || 0,
-            createdAt: user.createdAt,
-            lastActive: user.lastActive
-        });
-
-    } catch (error) {
-        console.error('Get user error:', error);
-        res.status(401).json({ error: 'Unauthorized' });
-    }
+    res.json({
+        id: user._id,
+        auth0Id: user.auth0Id,
+        email: user.email,
+        fullName: user.fullName,
+        phone: user.phone,
+        segment: user.segment,
+        language: user.language,
+        timezoneOffsetMinutes: user.timezoneOffsetMinutes,
+        learningLanguages: user.learningLanguages || [],
+        teachingLanguages: user.teachingLanguages || [],
+        subscriptionTier: user.subscriptionTier,
+        subscriptionExpires: user.subscriptionExpires,
+        referralCode: user.referralCode,
+        referralCount: user.referralCount || 0,
+        pendingReferrals: user.pendingReferrals || 0,
+        referralsRewarded: user.referralsRewarded || 0,
+        referredBy: user.referredBy,
+        streakFreezesAvailable: user.streakFreezesAvailable || 0,
+        avatarUrl: user.avatarUrl,
+        coverPhotoUrl: user.coverPhotoUrl,
+        username: user.username,
+        bio: user.bio,
+        location: user.location,
+        isPublic: user.isPublic,
+        isVerified: user.isVerified,
+        podsJoined: user.podsJoined || 0,
+        activePairs: user.activePairs || 0,
+        cardsShared: user.cardsShared || 0,
+        createdAt: user.createdAt,
+        lastActive: user.lastActive
+    });
 });
 
 /**
