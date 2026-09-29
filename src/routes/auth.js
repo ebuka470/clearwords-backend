@@ -1,609 +1,338 @@
 import express from 'express';
+import bcrypt from 'bcrypt';
+import jwt from 'jsonwebtoken';
 import User from '../models/User.js';
 import Progress from '../models/Progress.js';
 import Referral from '../models/Referral.js';
 import Notification from '../models/Notification.js';
-
-import {
-    authenticateUser,
-    signToken
-} from '../middleware/auth.js';
-
-import {
-    hashPassword,
-    verifyPassword,
-    validatePassword
-} from '../utils/password.js';
+import { rateLimiter } from '../middleware/rateLimit.js';
 
 const router = express.Router();
 
 // ============================================
+// CONSTANTS
+// ============================================
+const TOKEN_LIFETIME = '30d';
+const BCRYPT_ROUNDS = 12;
+
+// ============================================
 // HELPERS
 // ============================================
-
-function normalizeEmail(email) {
-    return String(email || '')
-        .trim()
-        .toLowerCase();
+function issueToken(user) {
+    return jwt.sign(
+        { sub: user._id.toString(), email: user.email },
+        process.env.JWT_SECRET,
+        { expiresIn: TOKEN_LIFETIME }
+    );
 }
 
-function isValidEmail(email) {
-    return /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email);
-}
-
-function cleanUsername(username) {
-    if (!username) return '';
-
-    return String(username)
-        .trim()
-        .toLowerCase()
-        .replace(/^@/, '');
-}
-
+/**
+ * Strip sensitive fields from a User document before sending to client.
+ * (Defense in depth — passwordHash already has select:false on the schema.)
+ */
 function publicUser(user) {
     return {
         id: user._id,
         email: user.email,
-        emailVerified: user.emailVerified,
-
         fullName: user.fullName,
         phone: user.phone,
-
+        segment: user.segment,
+        language: user.language,
+        timezoneOffsetMinutes: user.timezoneOffsetMinutes,
+        learningLanguages: user.learningLanguages || [],
+        teachingLanguages: user.teachingLanguages || [],
+        subscriptionTier: user.subscriptionTier,
+        subscriptionExpires: user.subscriptionExpires,
+        referralCode: user.referralCode,
+        referralCount: user.referralCount || 0,
+        pendingReferrals: user.pendingReferrals || 0,
+        referralsRewarded: user.referralsRewarded || 0,
+        referredBy: user.referredBy,
+        streakFreezesAvailable: user.streakFreezesAvailable || 0,
+        avatarUrl: user.avatarUrl,
+        coverPhotoUrl: user.coverPhotoUrl,
         username: user.username,
         bio: user.bio,
         location: user.location,
-
-        avatarUrl: user.avatarUrl,
-        coverPhotoUrl: user.coverPhotoUrl,
-
         isPublic: user.isPublic,
         isVerified: user.isVerified,
-
-        segment: user.segment,
-        language: user.language,
-
-        timezoneOffsetMinutes:
-            user.timezoneOffsetMinutes,
-
-        learningLanguages:
-            user.learningLanguages || [],
-
-        teachingLanguages:
-            user.teachingLanguages || [],
-
-        subscriptionTier:
-            user.subscriptionTier,
-
-        subscriptionExpires:
-            user.subscriptionExpires,
-
-        referralCode:
-            user.referralCode,
-
-        referralCount:
-            user.referralCount || 0,
-
-        pendingReferrals:
-            user.pendingReferrals || 0,
-
-        referralsRewarded:
-            user.referralsRewarded || 0,
-
-        referredBy:
-            user.referredBy,
-
-        streakFreezesAvailable:
-            user.streakFreezesAvailable || 0,
-
-        podsJoined:
-            user.podsJoined || 0,
-
-        activePairs:
-            user.activePairs || 0,
-
-        cardsShared:
-            user.cardsShared || 0,
-
-        createdAt:
-            user.createdAt,
-
-        lastActive:
-            user.lastActive
+        podsJoined: user.podsJoined || 0,
+        activePairs: user.activePairs || 0,
+        cardsShared: user.cardsShared || 0,
+        createdAt: user.createdAt,
+        lastActive: user.lastActive
     };
 }
 
 // ============================================
-// GET /api/auth/config
-//
-// ClearWords-owned authentication config.
-// No Auth0 values are returned.
-// ============================================
-
-router.get('/config', (req, res) => {
-    res.json({
-        provider: 'clearwords',
-        method: 'email-password',
-        tokenType: 'Bearer',
-        expiresIn:
-            process.env.JWT_EXPIRES_IN || '7d',
-        passwordRecovery:
-            !!process.env.RESEND_API_KEY
-    });
-});
-
-// ============================================
 // POST /api/auth/signup
+// Body: { email, password, fullName, segment, language, phone, referralCode }
+// Returns: { success, token, user, referral }
 // ============================================
-
 router.post('/signup', async (req, res) => {
     const {
         email,
         password,
-        confirmPassword,
         fullName,
-        username,
         segment,
         language,
         phone,
         referralCode
     } = req.body;
 
-    const normalizedEmail =
-        normalizeEmail(email);
-
-    // --------------------------------------------
-    // Validate email
-    // --------------------------------------------
-
-    if (!normalizedEmail) {
-        return res.status(400).json({
-            error: 'Email is required'
-        });
+    if (!email || !password) {
+        return res.status(400).json({ error: 'email and password are required' });
     }
 
-    if (!isValidEmail(normalizedEmail)) {
-        return res.status(400).json({
-            error: 'Please enter a valid email address'
-        });
+    if (password.length < 6) {
+        return res.status(400).json({ error: 'Password must be at least 6 characters' });
     }
 
-    // --------------------------------------------
-    // Validate password
-    // --------------------------------------------
-
-    const passwordError =
-        validatePassword(password);
-
-    if (passwordError) {
-        return res.status(400).json({
-            error: passwordError
-        });
-    }
-
-    if (password !== confirmPassword) {
-        return res.status(400).json({
-            error: 'Passwords do not match'
-        });
-    }
-
-    // --------------------------------------------
-    // Validate name
-    // --------------------------------------------
-
-    const normalizedFullName =
-        String(fullName || '')
-            .trim();
-
-    if (!normalizedFullName) {
-        return res.status(400).json({
-            error: 'Full name is required'
-        });
-    }
-
-    if (normalizedFullName.length > 100) {
-        return res.status(400).json({
-            error: 'Full name is too long'
-        });
-    }
+    const normalizedEmail = String(email).toLowerCase().trim();
 
     try {
-        // ----------------------------------------
-        // Existing account
-        // ----------------------------------------
-
-        const existingUser =
-            await User.findOne({
-                email: normalizedEmail
-            });
-
-        if (existingUser) {
-            return res.status(409).json({
-                error: 'An account with this email already exists'
-            });
+        const existing = await User.findOne({ email: normalizedEmail });
+        if (existing) {
+            return res.status(409).json({ error: 'Email already registered' });
         }
 
-        // ----------------------------------------
-        // Username
-        // ----------------------------------------
-
-        const normalizedUsername =
-            cleanUsername(username);
-
-        if (normalizedUsername) {
-            if (
-                normalizedUsername.length < 3 ||
-                normalizedUsername.length > 30
-            ) {
-                return res.status(400).json({
-                    error: 'Username must be between 3 and 30 characters'
-                });
-            }
-
-            if (
-                !/^[a-z0-9._]+$/.test(
-                    normalizedUsername
-                )
-            ) {
-                return res.status(400).json({
-                    error: 'Username can only contain letters, numbers, dots and underscores'
-                });
-            }
-
-            const usernameExists =
-                await User.findOne({
-                    username: normalizedUsername
-                });
-
-            if (usernameExists) {
-                return res.status(409).json({
-                    error: 'Username already taken'
-                });
-            }
-        }
-
-        // ----------------------------------------
-        // Password hash
-        // ----------------------------------------
-
-        const passwordHash =
-            await hashPassword(password);
-
-        // ----------------------------------------
-        // Create user
-        // ----------------------------------------
+        const passwordHash = await bcrypt.hash(password, BCRYPT_ROUNDS);
 
         const user = await User.create({
             email: normalizedEmail,
             passwordHash,
-
-            fullName:
-                normalizedFullName,
-
-            username:
-                normalizedUsername || undefined,
-
-            phone:
-                typeof phone === 'string'
-                    ? phone.trim()
-                    : '',
-
-            segment:
-                segment || 'young',
-
-            language:
-                language || 'yoruba',
-
-            emailVerified: false
+            fullName: fullName || normalizedEmail.split('@')[0],
+            phone: phone || '',
+            segment: segment || 'young',
+            language: language || 'yoruba'
         });
-
-        // ----------------------------------------
-        // Create progress
-        // ----------------------------------------
 
         await Progress.create({
             userId: user._id,
-            language:
-                language || user.language || 'yoruba',
-
+            language: language || 'yoruba',
             completedLevels: [],
             completedLessons: [],
-
             totalXP: 0,
             streak: 0,
             currentLevel: 1
         });
 
-        // ----------------------------------------
-        // Referral
-        // ----------------------------------------
-
+        // ============================================
+        // REFERRAL REDEMPTION (non-fatal)
+        // ============================================
         let referralResult = null;
-
         if (referralCode) {
             try {
-                const normalizedCode =
-                    String(referralCode)
-                        .trim()
-                        .toUpperCase();
+                const normalized = String(referralCode).trim().toUpperCase();
+                const referrer = await User.findOne({ referralCode: normalized });
 
-                const referrer =
-                    await User.findOne({
-                        referralCode:
-                            normalizedCode
-                    });
-
-                if (
-                    referrer &&
-                    referrer._id.toString() !==
-                        user._id.toString()
-                ) {
-                    const existingReferral =
-                        await Referral.findOne({
-                            referredUserId:
-                                user._id
-                        });
+                if (referrer && referrer._id.toString() !== user._id.toString()) {
+                    const existingReferral = await Referral.findOne({ referredUserId: user._id });
 
                     if (!existingReferral) {
                         await Referral.create({
-                            referrerId:
-                                referrer._id,
-
-                            referrerCode:
-                                referrer.referralCode,
-
-                            referredUserId:
-                                user._id,
-
-                            referredEmail:
-                                user.email,
-
-                            status:
-                                'pending'
+                            referrerId: referrer._id,
+                            referrerCode: referrer.referralCode,
+                            referredUserId: user._id,
+                            referredEmail: user.email,
+                            status: 'pending'
                         });
 
-                        user.referredBy =
-                            referrer._id;
-
+                        user.referredBy = referrer._id;
                         await user.save();
 
-                        await User.findByIdAndUpdate(
-                            referrer._id,
-                            {
-                                $inc: {
-                                    pendingReferrals: 1
-                                }
-                            }
-                        );
+                        await User.findByIdAndUpdate(referrer._id, {
+                            $inc: { pendingReferrals: 1 }
+                        });
 
                         await Notification.create({
-                            userId:
-                                referrer._id,
-
-                            type:
-                                'referral_signup',
-
-                            sourceId:
-                                user._id,
-
-                            sourceUsername:
-                                user.username ||
-                                'User',
-
-                            sourceAvatar:
-                                user.avatarUrl ||
-                                '',
-
-                            content:
-                                `${user.fullName || 'Someone'} signed up with your code! They'll count once they finish their first lesson.`
+                            userId: referrer._id,
+                            type: 'referral_signup',
+                            sourceId: user._id,
+                            sourceUsername: user.username || 'User',
+                            sourceAvatar: user.avatarUrl || '',
+                            content: `${user.fullName || 'Someone'} signed up with your code! They'll count once they finish their first lesson.`
                         });
 
                         referralResult = {
                             applied: true,
-                            referrer:
-                                referrer.username ||
-                                referrer.fullName
+                            referrer: referrer.username || referrer.fullName
                         };
                     } else {
-                        referralResult = {
-                            applied: false,
-                            reason:
-                                'already_referred'
-                        };
+                        referralResult = { applied: false, reason: 'already_referred' };
                     }
                 } else if (referrer) {
-                    referralResult = {
-                        applied: false,
-                        reason:
-                            'self_referral'
-                    };
+                    referralResult = { applied: false, reason: 'self_referral' };
                 } else {
-                    referralResult = {
-                        applied: false,
-                        reason:
-                            'invalid_code'
-                    };
+                    referralResult = { applied: false, reason: 'invalid_code' };
                 }
-            } catch (referralError) {
-                console.warn(
-                    'Referral signup failed:',
-                    referralError.message
-                );
-
-                referralResult = {
-                    applied: false,
-                    reason: 'error'
-                };
+            } catch (refErr) {
+                console.warn('Referral redemption failed (non-fatal):', refErr.message);
+                referralResult = { applied: false, reason: 'error' };
             }
         }
 
-        // ----------------------------------------
-        // JWT
-        // ----------------------------------------
+        const token = issueToken(user);
 
-        const token =
-            signToken(user);
-
-        return res.status(201).json({
+        res.status(201).json({
             success: true,
             token,
             user: publicUser(user),
             referral: referralResult
         });
+
     } catch (error) {
-        console.error(
-            'Signup error:',
-            error
-        );
-
-        if (
-            error.code === 11000
-        ) {
-            return res.status(409).json({
-                error: 'An account with those details already exists'
-            });
-        }
-
-        return res.status(400).json({
-            error:
-                error.message ||
-                'Signup failed'
-        });
+        console.error('Signup error:', error);
+        res.status(400).json({ error: error.message || 'Signup failed' });
     }
 });
 
 // ============================================
 // POST /api/auth/login
+// Body: { email, password }
+// Returns: { success, token, user }
+// Rate-limited to slow down credential stuffing.
 // ============================================
-
-router.post('/login', async (req, res) => {
-    const {
-        email,
-        password
-    } = req.body;
-
-    const normalizedEmail =
-        normalizeEmail(email);
-
-    if (!normalizedEmail || !password) {
-        return res.status(400).json({
-            error:
-                'Email and password are required'
-        });
-    }
-
-    try {
-        const user =
-            await User.findOne({
-                email: normalizedEmail
-            }).select('+passwordHash');
-
-        if (!user) {
-            return res.status(401).json({
-                error:
-                    'Invalid email or password'
-            });
-        }
-
-        if (user.deletedAt) {
-            return res.status(401).json({
-                error:
-                    'This account has been deleted'
-            });
-        }
-
-        if (user.isBanned) {
-            return res.status(403).json({
-                error:
-                    'Account is banned'
-            });
-        }
-
-        if (user.isActive === false) {
-            return res.status(403).json({
-                error:
-                    'Account is inactive'
-            });
-        }
-
-        if (!user.passwordHash) {
-            return res.status(401).json({
-                error:
-                    'This account needs to be registered again'
-            });
-        }
-
-        const validPassword =
-            await verifyPassword(
-                password,
-                user.passwordHash
-            );
-
-        if (!validPassword) {
-            return res.status(401).json({
-                error:
-                    'Invalid email or password'
-            });
-        }
-
-        user.lastActive =
-            new Date();
-
-        user.lastSeen =
-            new Date();
-
-        await user.save();
-
-        const token =
-            signToken(user);
-
-        return res.json({
-            success: true,
-            token,
-            user: publicUser(user)
-        });
-    } catch (error) {
-        console.error(
-            'Login error:',
-            error
-        );
-
-        return res.status(500).json({
-            error:
-                'Login failed'
-        });
-    }
-});
-
-// ============================================
-// POST /api/auth/logout
-//
-// JWTs are stateless. The client removes its token.
-// ============================================
-
 router.post(
-    '/logout',
-    authenticateUser,
+    '/login',
+    rateLimiter(20, 15 * 60 * 1000),   // 20 attempts per 15 minutes per IP+path
     async (req, res) => {
-        return res.json({
-            success: true,
-            message:
-                'Logged out successfully'
-        });
+        const { email, password } = req.body;
+
+        if (!email || !password) {
+            return res.status(400).json({ error: 'email and password are required' });
+        }
+
+        const normalizedEmail = String(email).toLowerCase().trim();
+
+        try {
+            // .select('+passwordHash') is required because the schema hides it by default.
+            const user = await User.findOne({ email: normalizedEmail }).select('+passwordHash');
+
+            // Same generic error for "no user" and "wrong password" so an
+            // attacker can't enumerate which emails exist.
+            if (!user || !user.passwordHash) {
+                return res.status(401).json({ error: 'Invalid credentials' });
+            }
+
+            if (user.isBanned) {
+                return res.status(403).json({ error: 'Account is banned' });
+            }
+
+            const valid = await bcrypt.compare(password, user.passwordHash);
+            if (!valid) {
+                return res.status(401).json({ error: 'Invalid credentials' });
+            }
+
+            user.lastActive = new Date();
+            user.lastSeen = new Date();
+            await user.save();
+
+            const token = issueToken(user);
+
+            res.json({
+                success: true,
+                token,
+                user: publicUser(user)
+            });
+
+        } catch (error) {
+            console.error('Login error:', error);
+            res.status(400).json({ error: error.message || 'Login failed' });
+        }
     }
 );
 
 // ============================================
 // GET /api/auth/me
+// Reads the Bearer token, returns the current user.
 // ============================================
-
-router.get(
-    '/me',
-    authenticateUser,
-    async (req, res) => {
-        return res.json(
-            publicUser(req.user)
-        );
+router.get('/me', async (req, res) => {
+    const authHeader = req.headers.authorization;
+    if (!authHeader || !authHeader.startsWith('Bearer ')) {
+        return res.status(401).json({ error: 'Missing authorization header' });
     }
-);
+
+    const token = authHeader.split(' ')[1];
+
+    try {
+        const decoded = jwt.verify(token, process.env.JWT_SECRET, {
+            algorithms: ['HS256']
+        });
+
+        const user = await User.findById(decoded.sub);
+        if (!user) {
+            return res.status(404).json({ error: 'User not found' });
+        }
+
+        user.lastActive = new Date();
+        user.lastSeen = new Date();
+        await user.save();
+
+        res.json(publicUser(user));
+
+    } catch (error) {
+        if (error.name === 'TokenExpiredError') {
+            return res.status(401).json({ error: 'Token expired' });
+        }
+        console.error('Get user error:', error.message);
+        res.status(401).json({ error: 'Unauthorized' });
+    }
+});
+
+// ============================================
+// POST /api/auth/test-token
+// DEV ONLY — creates a user with a known password and returns a JWT.
+// Never enabled when NODE_ENV=production.
+// ============================================
+if (process.env.NODE_ENV !== 'production') {
+    router.post('/test-token', async (req, res) => {
+        const { email, password, fullName } = req.body;
+
+        if (!email || !password) {
+            return res.status(400).json({ error: 'email and password required' });
+        }
+
+        const normalizedEmail = String(email).toLowerCase().trim();
+
+        try {
+            let user = await User.findOne({ email: normalizedEmail });
+
+            if (!user) {
+                const passwordHash = await bcrypt.hash(password, BCRYPT_ROUNDS);
+                user = await User.create({
+                    email: normalizedEmail,
+                    passwordHash,
+                    fullName: fullName || normalizedEmail.split('@')[0]
+                });
+
+                await Progress.create({
+                    userId: user._id,
+                    language: user.language || 'yoruba',
+                    completedLevels: [],
+                    completedLessons: [],
+                    totalXP: 0,
+                    streak: 0,
+                    currentLevel: 1
+                });
+            }
+
+            const token = issueToken(user);
+
+            res.json({
+                token,
+                user: {
+                    id: user._id,
+                    email: user.email,
+                    fullName: user.fullName,
+                    referralCode: user.referralCode
+                }
+            });
+        } catch (error) {
+            console.error('Test-token error:', error);
+            res.status(400).json({ error: error.message });
+        }
+    });
+}
 
 export default router;
