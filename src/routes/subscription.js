@@ -14,12 +14,12 @@ const router = express.Router();
 // ============================================
 const TIER_PRICES = {
     premium: {
-        NGN: { monthly: 250000, yearly: 2500000 },
-        USD: { monthly: 500, yearly: 5000 }
+        NGN: { monthly: 2500, yearly: 20000 },
+        USD: { monthly: 4.99, yearly: 39.99 }
     },
     immersive: {
-        NGN: { monthly: 500000, yearly: 5000000 },
-        USD: { monthly: 1000, yearly: 10000 }
+        NGN: { monthly: 4500, yearly: 36000 },
+        USD: { monthly: 8.99, yearly: 69.99 }
     }
 };
 

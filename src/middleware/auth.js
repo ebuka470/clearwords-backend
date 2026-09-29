@@ -1,110 +1,156 @@
 import jwt from 'jsonwebtoken';
-import jwksClient from 'jwks-rsa';
 import User from '../models/User.js';
 
-// ============================================
-// AUTH0 JWKS CLIENT (cached signing keys)
-// ============================================
-const jwks = jwksClient({
-    jwksUri: `https://${process.env.AUTH0_DOMAIN}/.well-known/jwks.json`,
-    cache: true,
-    cacheMaxAge: 10 * 60 * 1000,
-    rateLimit: true,
-    jwksRequestsPerMinute: 10,
-    timeout: 5000
-});
+const JWT_EXPIRES_IN = process.env.JWT_EXPIRES_IN || '7d';
 
-function getSigningKey(header, callback) {
-    jwks.getSigningKey(header.kid, (err, key) => {
-        if (err) return callback(err);
-        callback(null, key.getPublicKey());
-    });
-}
-
-/**
- * Verify a token using either:
- *   - RS256 (Auth0 default) via JWKS
- *   - HS256 (shared secret) via JWT_SECRET
- * Chosen automatically based on the token's `alg` header.
- */
-function verifyToken(token) {
-    return new Promise((resolve, reject) => {
-        const decoded = jwt.decode(token, { complete: true });
-        if (!decoded || !decoded.header) {
-            return reject(new Error('Invalid token format'));
-        }
-
-        const alg = decoded.header.alg;
-
-        const options = {
-            audience: process.env.AUTH0_AUDIENCE,
-            issuer: `https://${process.env.AUTH0_DOMAIN}/`,
-            algorithms: alg === 'HS256' ? ['HS256'] : ['RS256']
-        };
-
-        if (alg === 'HS256') {
-            if (!process.env.JWT_SECRET) {
-                return reject(new Error('JWT_SECRET not configured'));
-            }
-            jwt.verify(token, process.env.JWT_SECRET, options, (err, payload) => {
-                if (err) return reject(err);
-                resolve(payload);
-            });
-        } else {
-            jwt.verify(token, getSigningKey, options, (err, payload) => {
-                if (err) return reject(err);
-                resolve(payload);
-            });
-        }
-    });
-}
-
-/**
- * Authenticate user via JWT token.
- * Auto-provisions a user record on first authenticated request if needed.
- */
-export async function authenticateUser(req, res, next) {
+function getTokenFromRequest(req) {
     const authHeader = req.headers.authorization;
 
     if (!authHeader || !authHeader.startsWith('Bearer ')) {
-        return res.status(401).json({ error: 'Missing or invalid authorization header' });
+        return null;
     }
 
-    const token = authHeader.split(' ')[1];
+    const token = authHeader.slice(7).trim();
+
+    return token || null;
+}
+
+export function signToken(user) {
+    if (!process.env.JWT_SECRET) {
+        throw new Error('JWT_SECRET is not configured');
+    }
+
+    return jwt.sign(
+        {
+            userId: user._id.toString()
+        },
+        process.env.JWT_SECRET,
+        {
+            expiresIn: JWT_EXPIRES_IN
+        }
+    );
+}
+
+export function verifyToken(token) {
+    if (!process.env.JWT_SECRET) {
+        throw new Error('JWT_SECRET is not configured');
+    }
+
+    return jwt.verify(token, process.env.JWT_SECRET);
+}
+
+export async function authenticateUser(req, res, next) {
+    const token = getTokenFromRequest(req);
+
+    if (!token) {
+        return res.status(401).json({
+            error: 'Authentication required'
+        });
+    }
 
     try {
-        const decoded = await verifyToken(token);
+        const decoded = verifyToken(token);
 
-        let user = await User.findOne({ auth0Id: decoded.sub });
+        if (!decoded || !decoded.userId) {
+            return res.status(401).json({
+                error: 'Invalid authentication token'
+            });
+        }
+
+        const user = await User.findById(decoded.userId);
 
         if (!user) {
-            const namespacedEmail = decoded[`${process.env.AUTH0_AUDIENCE}/email`];
-            user = await User.create({
-                auth0Id: decoded.sub,
-                email: decoded.email || namespacedEmail || '',
-                fullName: decoded.name || decoded.nickname || decoded.email?.split('@')[0] || 'User'
+            return res.status(401).json({
+                error: 'User account no longer exists'
+            });
+        }
+
+        if (user.deletedAt) {
+            return res.status(401).json({
+                error: 'This account has been deleted'
             });
         }
 
         if (user.isBanned) {
-            return res.status(403).json({ error: 'Account is banned' });
+            return res.status(403).json({
+                error: 'Account is banned'
+            });
         }
 
-        user.lastActive = new Date();
-        user.lastSeen = new Date();
+        if (user.isActive === false) {
+            return res.status(403).json({
+                error: 'Account is inactive'
+            });
+        }
+
+        const now = new Date();
+
+        user.lastActive = now;
+        user.lastSeen = now;
+
         await user.save();
 
         req.user = user;
         req.userId = user._id;
-        next();
 
+        return next();
     } catch (error) {
         console.error('Auth error:', error.message);
 
         if (error.name === 'TokenExpiredError') {
-            return res.status(401).json({ error: 'Token expired, please refresh' });
+            return res.status(401).json({
+                error: 'Session expired. Please log in again.'
+            });
         }
 
-        return res.status(401).json({ error: 'Unauthorized: ' + error.message });
+        if (error.name === 'JsonWebTokenError') {
+            return res.status(401).json({
+                error: 'Invalid authentication token'
+            });
+        }
+
+        return res.status(401).json({
+            error: 'Authentication failed'
+        });
     }
 }
+
+/**
+ * Optional authentication.
+ *
+ * Public routes can use this when they want to know whether
+ * the requester is logged in without requiring authentication.
+ */
+export async function authenticateOptionalUser(req, res, next) {
+    const token = getTokenFromRequest(req);
+
+    req.user = null;
+    req.userId = null;
+
+    if (!token) {
+        return next();
+    }
+
+    try {
+        const decoded = verifyToken(token);
+
+        if (!decoded || !decoded.userId) {
+            return next();
+        }
+
+        const user = await User.findById(decoded.userId);
+
+        if (!user || user.deletedAt || user.isBanned || user.isActive === false) {
+            return next();
+        }
+
+        req.user = user;
+        req.userId = user._id;
+
+        return next();
+    } catch {
+        return next();
+    }
+}
+
+export default authenticateUser;
