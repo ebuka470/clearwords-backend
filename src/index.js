@@ -189,7 +189,7 @@ startDormantPodJob();
 
 // Keep-alive
 const keepAliveUrl = 'https://clearwords-backend.onrender.com/health';
-const KEEP_ALIVE_INTERVAL = 30 * 1000;
+const KEEP_ALIVE_INTERVAL = 300 * 1000;
 
 function keepAlive() {
     axios.get(keepAliveUrl)
