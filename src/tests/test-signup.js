@@ -284,6 +284,74 @@ async function testAuthenticated() {
         console.log('   Response keys:', data ? Object.keys(data).slice(0, 8) : data);
         check('progress', 200, status);
     } catch (err) { console.error('   ❌', err.message); check('progress', 200, 'error'); }
+
+    console.log('\n3️⃣3️⃣  Change password — wrong current password (expecting 401)...');
+try {
+    const { status } = await req('POST', '/api/auth/change-password', {
+        ...auth,
+        body: {
+            currentPassword: 'definitely-wrong',
+            newPassword: 'newpassword123'
+        }
+    });
+    check('change-pw-wrong-current', 401, status);
+} catch (err) { console.error('   ❌', err.message); check('change-pw-wrong-current', 401, 'error'); }
+
+console.log('\n3️⃣4️⃣  Change password — too short (expecting 400)...');
+try {
+    const { status } = await req('POST', '/api/auth/change-password', {
+        ...auth,
+        body: {
+            currentPassword: TEST_PASSWORD,
+            newPassword: 'abc'
+        }
+    });
+    check('change-pw-short', 400, status);
+} catch (err) { console.error('   ❌', err.message); check('change-pw-short', 400, 'error'); }
+
+console.log('\n3️⃣5️⃣  Change password — same as current (expecting 400)...');
+try {
+    const { status } = await req('POST', '/api/auth/change-password', {
+        ...auth,
+        body: {
+            currentPassword: TEST_PASSWORD,
+            newPassword: TEST_PASSWORD
+        }
+    });
+    check('change-pw-same', 400, status);
+} catch (err) { console.error('   ❌', err.message); check('change-pw-same', 400, 'error'); }
+
+console.log('\n3️⃣6️⃣  Change password — success...');
+try {
+    const { status, data } = await req('POST', '/api/auth/change-password', {
+        ...auth,
+        body: {
+            currentPassword: TEST_PASSWORD,
+            newPassword: 'newpassword12345'
+        }
+    });
+    console.log('   Response:', data?.message);
+    check('change-pw-success', 200, status);
+    if (data?.token) {
+        console.log(`   ✅ Fresh token issued (${data.token.length} chars)`);
+    }
+} catch (err) { console.error('   ❌', err.message); check('change-pw-success', 200, 'error'); }
+
+console.log('\n3️⃣7️⃣  Login with new password...');
+try {
+    const { status } = await req('POST', '/api/auth/login', {
+        body: { email: TEST_EMAIL, password: 'newpassword12345' }
+    });
+    check('login-new-pw', 200, status);
+} catch (err) { console.error('   ❌', err.message); check('login-new-pw', 200, 'error'); }
+
+console.log('\n3️⃣8️⃣  Login with old password (expecting 401)...');
+try {
+    const { status } = await req('POST', '/api/auth/login', {
+        body: { email: TEST_EMAIL, password: TEST_PASSWORD }
+    });
+    check('login-old-pw', 401, status);
+} catch (err) { console.error('   ❌', err.message); check('login-old-pw', 401, 'error'); }
 }
 
 // ============================================

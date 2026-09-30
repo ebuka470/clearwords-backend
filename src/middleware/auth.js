@@ -19,9 +19,21 @@ function verifyToken(req) {
 }
 
 /**
+ * Returns true if the token was issued before the user's last password
+ * change. In that case the token should be treated as expired, even if
+ * its `exp` claim is still in the future.
+ */
+function tokenPredatesPasswordChange(decoded, user) {
+    if (!user.passwordChangedAt) return false;
+    if (!decoded.iat) return false;
+    return decoded.iat * 1000 < user.passwordChangedAt.getTime();
+}
+
+/**
  * Authenticate via a ClearWords-issued JWT.
  * Rejects the request (401/403) if the token is missing, invalid,
- * belongs to a deleted user, or belongs to a banned user.
+ * belongs to a deleted user, belongs to a banned user, or was issued
+ * before the user's last password change.
  */
 export async function authenticateUser(req, res, next) {
     const authHeader = req.headers.authorization;
@@ -44,6 +56,11 @@ export async function authenticateUser(req, res, next) {
         if (user.isBanned) {
             return res.status(403).json({ error: 'Account is banned' });
         }
+        if (tokenPredatesPasswordChange(decoded, user)) {
+            return res.status(401).json({
+                error: 'Session expired — please log in again'
+            });
+        }
 
         user.lastActive = new Date();
         user.lastSeen = new Date();
@@ -64,15 +81,11 @@ export async function authenticateUser(req, res, next) {
 
 /**
  * Optional authentication.
- *
- * Used on routes like GET /api/users/:identifier that must work for
- * both anonymous visitors AND logged-in owners:
- *   - If a valid token is present, populates req.user / req.userId
- *   - If not, continues with req.user = null, req.userId = null
- *
- * NEVER rejects the request based on auth state. A banned user is
- * treated the same as an anonymous visitor — req.userId stays null,
- * so downstream privacy checks fall back to "public view".
+ * Used on GET /api/users/:identifier where the route must work for
+ * both anonymous visitors AND the logged-in owner.
+ *   - Valid token (and not stale) → req.user + req.userId populated
+ *   - No / invalid / stale token → req.user = null, req.userId = null
+ * Never rejects the request.
  */
 export async function authenticateOptionalUser(req, res, next) {
     const decoded = verifyToken(req);
@@ -86,7 +99,7 @@ export async function authenticateOptionalUser(req, res, next) {
     try {
         const user = await User.findById(decoded.sub);
 
-        if (user && !user.isBanned) {
+        if (user && !user.isBanned && !tokenPredatesPasswordChange(decoded, user)) {
             user.lastActive = new Date();
             user.lastSeen = new Date();
             await user.save();

@@ -12,6 +12,10 @@ const UserSchema = new mongoose.Schema({
         required: true,
         select: false
     },
+    passwordChangedAt: {
+        type: Date,
+        default: null
+    },
     fullName: { type: String, required: true },
     phone: { type: String, default: '' },
     username: { type: String, sparse: true },
@@ -74,8 +78,6 @@ const UserSchema = new mongoose.Schema({
     deletedAt: { type: Date, default: null }
 });
 
-// Simple unique index on email. No partial filter needed anymore —
-// every user has a non-null email by definition.
 UserSchema.index({ email: 1 }, { unique: true });
 UserSchema.index({ username: 1 }, { unique: true, sparse: true });
 UserSchema.index({ referralCode: 1 }, { unique: true, sparse: true });

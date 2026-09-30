@@ -6,6 +6,7 @@ import Progress from '../models/Progress.js';
 import Referral from '../models/Referral.js';
 import Notification from '../models/Notification.js';
 import { rateLimiter } from '../middleware/rateLimit.js';
+import { authenticateUser } from '../middleware/auth.js';
 
 const router = express.Router();
 
@@ -66,8 +67,6 @@ function publicUser(user) {
 
 // ============================================
 // POST /api/auth/signup
-// Body: { email, password, fullName, segment, language, phone, referralCode }
-// Returns: { success, token, user, referral }
 // ============================================
 router.post('/signup', async (req, res) => {
     const {
@@ -117,9 +116,7 @@ router.post('/signup', async (req, res) => {
             currentLevel: 1
         });
 
-        // ============================================
-        // REFERRAL REDEMPTION (non-fatal)
-        // ============================================
+        // Referral redemption (non-fatal)
         let referralResult = null;
         if (referralCode) {
             try {
@@ -189,13 +186,11 @@ router.post('/signup', async (req, res) => {
 
 // ============================================
 // POST /api/auth/login
-// Body: { email, password }
-// Returns: { success, token, user }
 // Rate-limited to slow down credential stuffing.
 // ============================================
 router.post(
     '/login',
-    rateLimiter(20, 15 * 60 * 1000),   // 20 attempts per 15 minutes per IP+path
+    rateLimiter(20, 15 * 60 * 1000),
     async (req, res) => {
         const { email, password } = req.body;
 
@@ -206,11 +201,8 @@ router.post(
         const normalizedEmail = String(email).toLowerCase().trim();
 
         try {
-            // .select('+passwordHash') is required because the schema hides it by default.
             const user = await User.findOne({ email: normalizedEmail }).select('+passwordHash');
 
-            // Same generic error for "no user" and "wrong password" so an
-            // attacker can't enumerate which emails exist.
             if (!user || !user.passwordHash) {
                 return res.status(401).json({ error: 'Invalid credentials' });
             }
@@ -244,8 +236,69 @@ router.post(
 );
 
 // ============================================
+// POST /api/auth/change-password
+// Authenticated. User must supply current + new password.
+// ============================================
+router.post(
+    '/change-password',
+    authenticateUser,
+    rateLimiter(10, 15 * 60 * 1000),
+    async (req, res) => {
+        const { currentPassword, newPassword } = req.body;
+
+        if (!currentPassword || !newPassword) {
+            return res.status(400).json({
+                error: 'currentPassword and newPassword are required'
+            });
+        }
+
+        if (newPassword.length < 6) {
+            return res.status(400).json({
+                error: 'New password must be at least 6 characters'
+            });
+        }
+
+        if (currentPassword === newPassword) {
+            return res.status(400).json({
+                error: 'New password must be different from current password'
+            });
+        }
+
+        try {
+            // Middleware loaded req.user without passwordHash (select:false).
+            // Re-fetch with the hash so we can compare.
+            const user = await User.findById(req.userId).select('+passwordHash');
+            if (!user) {
+                return res.status(404).json({ error: 'User not found' });
+            }
+
+            const valid = await bcrypt.compare(currentPassword, user.passwordHash);
+            if (!valid) {
+                return res.status(401).json({ error: 'Current password is incorrect' });
+            }
+
+            user.passwordHash = await bcrypt.hash(newPassword, BCRYPT_ROUNDS);
+            user.passwordChangedAt = new Date();
+            await user.save();
+
+            // Issue a fresh token so this device stays logged in
+            // (the passwordChangedAt check would invalidate the old one).
+            const freshToken = issueToken(user);
+
+            res.json({
+                success: true,
+                message: 'Password updated successfully',
+                token: freshToken
+            });
+        } catch (error) {
+            console.error('Change password error:', error);
+            res.status(500).json({ error: 'Could not change password' });
+        }
+    }
+);
+
+// ============================================
 // GET /api/auth/me
-// Reads the Bearer token, returns the current user.
 // ============================================
 router.get('/me', async (req, res) => {
     const authHeader = req.headers.authorization;
@@ -265,6 +318,17 @@ router.get('/me', async (req, res) => {
             return res.status(404).json({ error: 'User not found' });
         }
 
+        // Reject tokens issued before the last password change
+        if (
+            user.passwordChangedAt &&
+            decoded.iat &&
+            decoded.iat * 1000 < user.passwordChangedAt.getTime()
+        ) {
+            return res.status(401).json({
+                error: 'Session expired — please log in again'
+            });
+        }
+
         user.lastActive = new Date();
         user.lastSeen = new Date();
         await user.save();
@@ -282,8 +346,7 @@ router.get('/me', async (req, res) => {
 
 // ============================================
 // POST /api/auth/test-token
-// DEV ONLY — creates a user with a known password and returns a JWT.
-// Never enabled when NODE_ENV=production.
+// DEV ONLY — never enabled in production.
 // ============================================
 if (process.env.NODE_ENV !== 'production') {
     router.post('/test-token', async (req, res) => {
