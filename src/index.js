@@ -74,7 +74,6 @@ app.use(cors({
             'https://clearwords-updates.vercel.app'
             'https://clearwords.com.ng',
             'https://www.clearwords.com.ng',
-            'https://clearwords-updates.vercel.app',
             'http://localhost:3000',
             'http://localhost:5173',
             'http://localhost:8081',
