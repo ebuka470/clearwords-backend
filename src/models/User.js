@@ -31,7 +31,7 @@ const UserSchema = new mongoose.Schema({
     lastSeen: { type: Date, default: Date.now },
     segment: {
         type: String,
-        enum: ['parent', 'young', 'pro', 'marriage', 'nigeria'],
+        enum: ['heritage', 'family', 'self', 'child', 'study'],
         default: 'young'
     },
     language: {
