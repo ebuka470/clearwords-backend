@@ -88,6 +88,9 @@ router.post('/', authenticateUser, async (req, res) => {
 /**
  * POST /api/pods/match
  */
+/**
+ * POST /api/pods/match
+ */
 router.post('/match', authenticateUser, async (req, res) => {
     let { language, level, timezone } = req.body || {};
 
@@ -143,6 +146,24 @@ router.post('/match', authenticateUser, async (req, res) => {
         );
 
         if (candidatePod) {
+            // ---- VERIFY the membership actually persisted ----
+            // findOneAndUpdate with $push occasionally reports success
+            // without the change landing if there's a write concern race.
+            // Re-fetch and confirm; fall back to an explicit save if not.
+            const check = await Pod.findById(candidatePod._id).select('members');
+            const isMember = check.members.some(m =>
+                m.userId.toString() === user._id.toString()
+            );
+
+            if (!isMember) {
+                console.warn('matchPod: $push did not persist — falling back to save', {
+                    podId: candidatePod._id.toString(),
+                    userId: user._id.toString()
+                });
+                check.members.push({ userId: user._id, role: 'member' });
+                await check.save();
+            }
+
             user.podsJoined = (user.podsJoined || 0) + 1;
             await user.save();
 
@@ -153,7 +174,9 @@ router.post('/match', authenticateUser, async (req, res) => {
                 content: `You were matched into "${candidatePod.name}"`
             });
 
-            return res.json({ matched: true, pod: candidatePod, created: false });
+            // Return the definitive pod state
+            const finalPod = await Pod.findById(candidatePod._id);
+            return res.json({ matched: true, pod: finalPod, created: false });
         }
 
         const newPod = await Pod.create({

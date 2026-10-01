@@ -9,10 +9,6 @@ import { canCreatePair, getUserLimits } from '../middleware/tierGate.js';
 
 const router = express.Router();
 
-/**
- * Compute effective voice/video flags for a pair.
- * Both users must have the entitlement for the pair to have it.
- */
 function computePairFlags(userA, userB) {
     const a = getUserLimits(userA);
     const b = getUserLimits(userB);
@@ -22,11 +18,6 @@ function computePairFlags(userA, userB) {
     };
 }
 
-/**
- * Shape a Pair document for the frontend.
- * Adds `partner` (the other user) and `data` (self-reference) so the
- * frontend can render either without knowing which side they're on.
- */
 function shapePair(pair, viewerId) {
     const obj = pair.toObject ? pair.toObject() : pair;
     const iAmA = obj.userA && obj.userA._id
@@ -39,8 +30,6 @@ function shapePair(pair, viewerId) {
 
 /**
  * GET /api/pairs
- * List the current user's pairs (both pending and active).
- * Returns { data, items, pairs, total } so any frontend shape works.
  */
 router.get('/', authenticateUser, async (req, res) => {
     try {
@@ -68,29 +57,16 @@ router.get('/', authenticateUser, async (req, res) => {
 
 /**
  * POST /api/pairs/request
- * Accepts `targetUserId` OR `userId` — the latter may be a Mongo _id
- * or a username.
- * Auto-fills languageA / languageB from the two users' preferences
- * if the frontend doesn't send them.
  */
 router.post('/request', authenticateUser, async (req, res) => {
-    const {
-        targetUserId,
-        userId,
-        languageA,
-        languageB,
-        message
-    } = req.body;
+    const { targetUserId, userId, languageA, languageB, message } = req.body;
 
     let resolvedTargetId = targetUserId || userId;
     if (!resolvedTargetId) {
-        return res.status(400).json({
-            error: 'targetUserId (or userId) is required'
-        });
+        return res.status(400).json({ error: 'targetUserId (or userId) is required' });
     }
 
     try {
-        // Non-hex string → treat as username
         if (!/^[0-9a-fA-F]{24}$/.test(String(resolvedTargetId))) {
             const byUsername = await User.findOne({
                 username: String(resolvedTargetId).replace(/^@/, '').toLowerCase()
@@ -127,7 +103,6 @@ router.post('/request', authenticateUser, async (req, res) => {
         });
         if (existing) return res.status(400).json({ error: 'Pair already exists' });
 
-        // Auto-fill languages from the two users' preferences
         let finalA = languageA;
         let finalB = languageB;
 
@@ -180,14 +155,10 @@ router.post('/request', authenticateUser, async (req, res) => {
 
 /**
  * POST /api/pairs/match
- * Auto-match the current user with the best candidate.
+ * Now matches on either direction of overlap, not both.
  */
 router.post('/match', authenticateUser, async (req, res) => {
-    const {
-        languageLearning,
-        languageTeaching,
-        timezoneOffsetMinutes
-    } = req.body || {};
+    const { languageLearning, languageTeaching, timezoneOffsetMinutes } = req.body || {};
 
     try {
         const me = await User.findById(req.userId);
@@ -206,8 +177,6 @@ router.post('/match', authenticateUser, async (req, res) => {
             ? languageTeaching
             : (me.teachingLanguages || []);
 
-        // Fall back to the user's primary language so a fresh signup can
-        // still be matched even before they've filled in their preferences.
         if (myLearning.length === 0 && me.language) myLearning.push(me.language);
         if (myTeaching.length === 0 && me.language) myTeaching.push(me.language);
 
@@ -237,12 +206,27 @@ router.post('/match', authenticateUser, async (req, res) => {
         });
         alreadyPairedWith.add(me._id.toString());
 
+        // ---- Candidate search ----
+        // A candidate qualifies if ANY of:
+        //   1. They teach something I'm learning AND learn something I teach
+        //   2. They teach something I'm learning (I can be their student)
+        //   3. They learn something I teach (they can be my student)
         const candidates = await User.find({
             _id: { $nin: Array.from(alreadyPairedWith) },
             isBanned: false,
             isActive: true,
-            teachingLanguages: { $in: myLearning },
-            learningLanguages: { $in: myTeaching }
+            $or: [
+                {
+                    teachingLanguages: { $in: myLearning },
+                    learningLanguages: { $in: myTeaching }
+                },
+                {
+                    teachingLanguages: { $in: myLearning }
+                },
+                {
+                    learningLanguages: { $in: myTeaching }
+                }
+            ]
         })
             .limit(40)
             .select('fullName username avatarUrl learningLanguages teachingLanguages language lastActive lastSeen subscriptionTier subscriptionExpires timezoneOffsetMinutes');
@@ -250,7 +234,7 @@ router.post('/match', authenticateUser, async (req, res) => {
         if (candidates.length === 0) {
             return res.status(404).json({
                 error: 'No matching partners found right now. Try again later.',
-                hint: 'Check back once more users join your language combination.'
+                hint: 'Add more learning and teaching languages to your profile to widen your matches.'
             });
         }
 
@@ -269,7 +253,10 @@ router.post('/match', authenticateUser, async (req, res) => {
 
             const sharedLearning = (c.teachingLanguages || []).filter(l => myLearning.includes(l));
             const sharedTeaching = (c.learningLanguages || []).filter(l => myTeaching.includes(l));
-            score += (sharedLearning.length + sharedTeaching.length) * 10;
+
+            // Reward both directions of overlap more heavily
+            if (sharedLearning.length && sharedTeaching.length) score += 30;
+            score += (sharedLearning.length + sharedTeaching.length) * 8;
 
             if (c.language && c.language === me.language) score += 5;
 
@@ -459,13 +446,7 @@ router.get('/:pairId/messages', authenticateUser, async (req, res) => {
         await pair.save();
 
         const ordered = messages.reverse();
-        res.json({
-            data: ordered,
-            items: ordered,
-            messages: ordered,
-            page,
-            limit
-        });
+        res.json({ data: ordered, items: ordered, messages: ordered, page, limit });
     } catch (error) {
         console.error('Get pair messages error:', error);
         res.status(400).json({ error: error.message });
@@ -474,7 +455,6 @@ router.get('/:pairId/messages', authenticateUser, async (req, res) => {
 
 /**
  * POST /api/pairs/:pairId/messages
- * Accepts `text` (canonical) or `content` (frontend alias).
  */
 router.post('/:pairId/messages', authenticateUser, moderationMiddleware, async (req, res) => {
     const { pairId } = req.params;
@@ -515,7 +495,6 @@ router.post('/:pairId/messages', authenticateUser, moderationMiddleware, async (
 
 /**
  * POST /api/pairs/:pairId/call/start
- * Session gate for voice/video calls.
  */
 router.post('/:pairId/call/start', authenticateUser, async (req, res) => {
     const { pairId } = req.params;

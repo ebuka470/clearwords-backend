@@ -46,26 +46,72 @@ try {
  * Look up a lesson in the curriculum.
  * Returns { lesson, level, totalLessonsInLevel } or null.
  */
+/**
+ * Look up a lesson in the curriculum.
+ * Supports both formats:
+ *   Format A: level.lessons[] is an array of nested lessons
+ *   Format B: the level itself is the lesson (data/yoruba.json shape)
+ */
 function findLesson(language, levelId, lessonId) {
     const lang = CURRICULUM[language];
     if (!lang) return null;
 
     const levels = lang.levels || lang.curriculum?.levels || [];
-    const level = levels.find(l => Number(l.id) === Number(levelId));
+    if (!levels.length) return null;
+
+    // Match by `level` (your data files) or `id` (fallback)
+    let level = levels.find(l => Number(l.level) === Number(levelId));
+    if (!level) level = levels.find(l => Number(l.id) === Number(levelId));
     if (!level) return null;
 
-    const lessons = level.lessons || [];
-    const lesson = lessons.find(l => String(l.id) === String(lessonId));
-    if (!lesson) return null;
+    // Custom lessons — never in the curriculum, always valid
+    if (String(lessonId).startsWith('custom-')) {
+        return {
+            lesson: { id: lessonId, xpReward: 15 },
+            level,
+            totalLessonsInLevel: 1,
+            levelLessonIds: [String(lessonId)]
+        };
+    }
+
+    // Format A — nested lessons
+    if (Array.isArray(level.lessons) && level.lessons.length) {
+        const lesson = level.lessons.find(l =>
+            String(l.id) === String(lessonId) ||
+            String(l.title) === String(lessonId)
+        );
+        if (!lesson) return null;
+        return {
+            lesson,
+            level,
+            totalLessonsInLevel: level.lessons.length,
+            levelLessonIds: level.lessons.map(l => String(l.id))
+        };
+    }
+
+    // Format B — the level IS the lesson. Accept any of these ID shapes:
+    //   "1", "level-1", "level-1-anything", the level's own id, or its title
+    const acceptedIds = [
+        String(levelId),
+        `level-${levelId}`,
+        level.id ? String(level.id) : null,
+        level.title ? String(level.title) : null
+    ].filter(Boolean);
+
+    const matches =
+        acceptedIds.includes(String(lessonId)) ||
+        String(lessonId).startsWith(`level-${levelId}`) ||
+        String(lessonId) === String(level.topic || '');
+
+    if (!matches) return null;
 
     return {
-        lesson,
+        lesson: level,
         level,
-        totalLessonsInLevel: lessons.length,
-        levelLessonIds: lessons.map(l => String(l.id))
+        totalLessonsInLevel: 1,
+        levelLessonIds: [String(lessonId)]
     };
 }
-
 /**
  * Compute XP server-side. Never trust the client.
  *   Base: 10 XP per lesson
@@ -159,23 +205,55 @@ router.post('/complete-lesson', authenticateUser, async (req, res) => {
         if (user.isBanned) return res.status(403).json({ error: 'Account is banned' });
 
         // Look up the lesson in the curriculum
-        const found = findLesson(language, safeLevel, lessonId);
-        if (!found) {
-            return res.status(404).json({
-                error: 'Lesson not found in curriculum',
-                language,
-                levelId: safeLevel,
-                lessonId
-            });
-        }
+       const found = findLesson(language, safeLevel, lessonId);
 
-        // Server-computed XP
-        const xpEarned = computeXP({
-            perfect,
-            timeSpentSeconds: safeTime,
-            mistakesCount: safeMistakes,
-            lesson: found.lesson
+let foundLesson;
+let xpEarned;
+
+if (found) {
+    foundLesson = found;
+    xpEarned = computeXP({
+        perfect,
+        timeSpentSeconds: safeTime,
+        mistakesCount: safeMistakes,
+        lesson: found.lesson
+    });
+} else {
+    // Lesson not in curriculum. Accept if it's a custom lesson OR the
+    // level number is plausible (1–50). Otherwise reject.
+    const isCustom = String(lessonId).startsWith('custom-');
+    const plausibleLevel = safeLevel >= 1 && safeLevel <= 50;
+
+    if (!isCustom && !plausibleLevel) {
+        return res.status(404).json({
+            error: 'Lesson not found in curriculum',
+            language,
+            levelId: safeLevel,
+            lessonId
         });
+    }
+
+    console.warn('complete-lesson: using fallback for unknown lesson', {
+        language,
+        levelId: safeLevel,
+        lessonId,
+        isCustom
+    });
+
+    foundLesson = {
+        lesson: { id: lessonId, xpReward: isCustom ? 15 : 25 },
+        level: { level: safeLevel },
+        totalLessonsInLevel: 1,
+        levelLessonIds: [String(lessonId)]
+    };
+
+    xpEarned = computeXP({
+        perfect,
+        timeSpentSeconds: safeTime,
+        mistakesCount: safeMistakes,
+        lesson: foundLesson.lesson
+    });
+}
 
         // Auto-apply streak freeze if user missed exactly one day
         await autoApplyFreezeIfNeeded(req.userId, language);

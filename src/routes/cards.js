@@ -112,18 +112,25 @@ router.post('/:cardId/share/pod/:podId', authenticateUser, async (req, res) => {
         const card = await ProgressCard.findOne({ _id: cardId, userId: req.userId });
         if (!card) return res.status(404).json({ error: 'Card not found' });
 
-        // Verify pod exists and caller is a member
         const pod = await Pod.findById(podId);
         if (!pod || !pod.isActive) {
             return res.status(404).json({ error: 'Pod not found' });
         }
 
         const isMember = pod.members.some(m => m.userId.toString() === req.userId);
+
         if (!isMember) {
-            return res.status(403).json({ error: 'You are not a member of this pod' });
+            console.warn('Card share rejected — not a member', {
+                podId,
+                reqUserId: req.userId,
+                memberIds: pod.members.map(m => m.userId.toString())
+            });
+            return res.status(403).json({
+                error: 'You are not a member of this pod',
+                hint: 'Try leaving and rejoining the pod, or reload the app.'
+            });
         }
 
-        // Only share to pods that match the card's language
         if (pod.language !== card.language) {
             return res.status(400).json({
                 error: `This card is for ${card.language}, but the pod is for ${pod.language}`
@@ -141,7 +148,6 @@ router.post('/:cardId/share/pod/:podId', authenticateUser, async (req, res) => {
         res.status(400).json({ error: error.message });
     }
 });
-
 /**
  * POST /api/cards/:cardId/share/external
  */
