@@ -350,7 +350,10 @@ router.post('/:pairId/accept', authenticateUser, async (req, res) => {
         const pair = await Pair.findById(pairId);
         if (!pair) return res.status(404).json({ error: 'Pair not found' });
 
-        if (pair.userB.toString() !== req.userId && pair.userA.toString() !== req.userId) {
+        if (
+    pair.userB.toString() !== req.userId.toString() &&
+    pair.userA.toString() !== req.userId.toString()
+) {
             return res.status(403).json({ error: 'Not part of this pair' });
         }
 
@@ -391,7 +394,10 @@ router.delete('/:pairId', authenticateUser, async (req, res) => {
         const pair = await Pair.findById(pairId);
         if (!pair) return res.status(404).json({ error: 'Pair not found' });
 
-        if (pair.userA.toString() !== req.userId && pair.userB.toString() !== req.userId) {
+        if (
+    pair.userA.toString() !== req.userId.toString() &&
+    pair.userB.toString() !== req.userId.toString()
+) {
             return res.status(403).json({ error: 'Not part of this pair' });
         }
 
@@ -431,7 +437,10 @@ router.get('/:pairId/messages', authenticateUser, async (req, res) => {
         const pair = await Pair.findById(pairId);
         if (!pair) return res.status(404).json({ error: 'Pair not found' });
 
-        if (pair.userA.toString() !== req.userId && pair.userB.toString() !== req.userId) {
+        if (
+    pair.userA.toString() !== req.userId.toString() &&
+    pair.userB.toString() !== req.userId.toString()
+) {
             return res.status(403).json({ error: 'Not part of this pair' });
         }
 
@@ -472,7 +481,10 @@ router.post('/:pairId/messages', authenticateUser, moderationMiddleware, async (
             return res.status(400).json({ error: 'Pair is not active' });
         }
 
-        if (pair.userA.toString() !== req.userId && pair.userB.toString() !== req.userId) {
+        if (
+    pair.userA.toString() !== req.userId.toString() &&
+    pair.userB.toString() !== req.userId.toString()
+) {
             return res.status(403).json({ error: 'Not part of this pair' });
         }
 
@@ -511,7 +523,10 @@ router.post('/:pairId/call/start', authenticateUser, async (req, res) => {
             return res.status(400).json({ error: 'Pair is not active' });
         }
 
-        if (pair.userA.toString() !== req.userId && pair.userB.toString() !== req.userId) {
+        if (
+    pair.userA.toString() !== req.userId.toString() &&
+    pair.userB.toString() !== req.userId.toString()
+) {
             return res.status(403).json({ error: 'Not part of this pair' });
         }
 
@@ -536,7 +551,7 @@ router.post('/:pairId/call/start', authenticateUser, async (req, res) => {
             });
         }
 
-        const partnerId = pair.userA.toString() === req.userId ? pair.userB : pair.userA;
+        const partnerId = pair.userA.toString() === req.userId.toString() ? pair.userB : pair.userA;
         const partner = await User.findById(partnerId);
         if (!partner) return res.status(404).json({ error: 'Partner not found' });
 
