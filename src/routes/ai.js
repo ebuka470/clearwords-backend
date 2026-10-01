@@ -29,6 +29,60 @@ function getMistral() {
     return _mistralClient;
 }
 
+/**
+ * Wrap a Mistral call so transient 429s (rate limit) are retried with
+ * exponential backoff before they reach the user. Two retries at 1s and 3s.
+ */
+async function mistralWithRetry(fn, maxRetries = 2) {
+    let lastError;
+    for (let attempt = 0; attempt <= maxRetries; attempt++) {
+        try {
+            return await fn();
+        } catch (err) {
+            lastError = err;
+            const status = err?.statusCode || err?.status || err?.response?.status;
+            if (status !== 429 || attempt === maxRetries) throw err;
+            // 1s, then 3s
+            await new Promise(r => setTimeout(r, 1000 * Math.pow(3, attempt)));
+        }
+    }
+    throw lastError;
+}
+
+/**
+ * Convert any Mistral-side error into a friendly API response.
+ * Returns { status, body } for the response.
+ */
+function mistralErrorResponse(error) {
+    const status = error?.statusCode || error?.status || error?.response?.status;
+    if (status === 429) {
+        return {
+            status: 429,
+            body: {
+                status: 'error',
+                message: 'Timmy is a bit overwhelmed right now. Please try again in a moment.',
+                retryable: true
+            }
+        };
+    }
+    if (status === 401 || status === 403) {
+        return {
+            status: 500,
+            body: {
+                status: 'error',
+                message: 'AI service is not configured correctly.'
+            }
+        };
+    }
+    return {
+        status: 502,
+        body: {
+            status: 'error',
+            message: 'Timmy couldn\'t respond just now. Please try again.'
+        }
+    };
+}
+
 function buildLessonPrompt({ topic, language, level, nativeLanguage, context }) {
     const langNames = {
         yoruba: 'Yoruba',
@@ -153,7 +207,6 @@ async function recordUsage(user, key, limit, dateKey) {
 
 // ============================================
 // POST /api/ai/chat
-// Timmy AI chat — tier-gated
 // ============================================
 router.post('/chat', authenticateUser, async (req, res) => {
     try {
@@ -197,10 +250,19 @@ router.post('/chat', authenticateUser, async (req, res) => {
         }
 
         const client = getMistral();
-        const chatResponse = await client.chat.complete({
-            model: 'mistral-small-2506',
-            messages: [{ role: 'user', content: prompt }]
-        });
+        let chatResponse;
+        try {
+            chatResponse = await mistralWithRetry(() =>
+                client.chat.complete({
+                    model: 'mistral-small-2506',
+                    messages: [{ role: 'user', content: prompt }]
+                })
+            );
+        } catch (mistralError) {
+            const { status, body } = mistralErrorResponse(mistralError);
+            console.error('Mistral chat error:', mistralError?.message || mistralError);
+            return res.status(status).json(body);
+        }
 
         const reply = chatResponse.choices?.[0]?.message?.content || '';
         const usage = await recordUsage(user, 'ai_chat_message', limit, dateKey);
@@ -213,14 +275,12 @@ router.post('/chat', authenticateUser, async (req, res) => {
 
     } catch (error) {
         console.error('AI chat error:', error);
-        res.status(500).json({ status: 'error', message: error.message });
+        res.status(500).json({ status: 'error', message: 'Something went wrong. Please try again.' });
     }
 });
 
 // ============================================
 // POST /api/ai/custom-lesson
-// Accepts either structured { topic, language, level }
-// OR a raw { prompt } string — topic is extracted from it.
 // ============================================
 router.post('/custom-lesson', authenticateUser, async (req, res) => {
     const {
@@ -238,14 +298,10 @@ router.post('/custom-lesson', authenticateUser, async (req, res) => {
     let effectiveLevel = level;
 
     if (!effectiveTopic && prompt) {
-        // Frontend's prompt shape:
-        //   Create a mini Yoruba lesson about "Ordering suya at a market". Return JSON with...
-        // Prefer the quoted substring (cleanest topic source).
         const quoted = String(prompt).match(/"([^"]{2,120})"/);
         if (quoted && quoted[1]) {
             effectiveTopic = quoted[1].trim();
         } else {
-            // Fall back to the first sentence, stripped of leading commands.
             const cleaned = String(prompt).replace(/\s+/g, ' ').trim();
             const firstSentence = cleaned.split(/[.\n]/)[0].slice(0, 200);
             effectiveTopic = firstSentence
@@ -304,12 +360,21 @@ router.post('/custom-lesson', authenticateUser, async (req, res) => {
             context
         });
 
-        const chatResponse = await client.chat.complete({
-            model: 'mistral-small-2506',
-            messages: [{ role: 'user', content: lessonPrompt }],
-            temperature: 0.7,
-            maxTokens: 2000
-        });
+        let chatResponse;
+        try {
+            chatResponse = await mistralWithRetry(() =>
+                client.chat.complete({
+                    model: 'mistral-small-2506',
+                    messages: [{ role: 'user', content: lessonPrompt }],
+                    temperature: 0.7,
+                    maxTokens: 2000
+                })
+            );
+        } catch (mistralError) {
+            const { status, body } = mistralErrorResponse(mistralError);
+            console.error('Mistral lesson error:', mistralError?.message || mistralError);
+            return res.status(status).json(body);
+        }
 
         const rawText = chatResponse.choices?.[0]?.message?.content;
         const lesson = extractJSON(rawText);
@@ -341,7 +406,7 @@ router.post('/custom-lesson', authenticateUser, async (req, res) => {
 
     } catch (error) {
         console.error('Custom lesson error:', error);
-        res.status(500).json({ error: error.message });
+        res.status(500).json({ error: 'Something went wrong. Please try again.' });
     }
 });
 

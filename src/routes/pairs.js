@@ -23,29 +23,43 @@ function computePairFlags(userA, userB) {
 }
 
 /**
+ * Shape a Pair document for the frontend.
+ * Adds `partner` (the other user) and `data` (self-reference) so the
+ * frontend can render either without knowing which side they're on.
+ */
+function shapePair(pair, viewerId) {
+    const obj = pair.toObject ? pair.toObject() : pair;
+    const iAmA = obj.userA && obj.userA._id
+        ? obj.userA._id.toString() === viewerId
+        : obj.userA.toString() === viewerId;
+    obj.partner = iAmA ? obj.userB : obj.userA;
+    obj.data = obj;
+    return obj;
+}
+
+/**
  * GET /api/pairs
+ * List the current user's pairs (both pending and active).
+ * Returns { data, items, pairs, total } so any frontend shape works.
  */
 router.get('/', authenticateUser, async (req, res) => {
     try {
         const pairs = await Pair.find({
             $or: [{ userA: req.userId }, { userB: req.userId }],
-            status: 'active'
+            status: { $in: ['pending', 'active'] }
         })
         .populate('userA', 'fullName username avatarUrl learningLanguages teachingLanguages language')
         .populate('userB', 'fullName username avatarUrl learningLanguages teachingLanguages language')
         .sort({ lastActivityAt: -1 });
 
-        // Shape the response so each pair includes a `partner` field —
-        // this is what the frontend renders directly.
-        const shaped = pairs.map(p => {
-            const obj = p.toObject();
-            const iAmA = obj.userA._id.toString() === req.userId;
-            obj.partner = iAmA ? obj.userB : obj.userA;
-            obj.data = obj; // frontend reads .data fallback too
-            return obj;
-        });
+        const shaped = pairs.map(p => shapePair(p, req.userId));
 
-        res.json({ data: shaped, total: shaped.length });
+        res.json({
+            data: shaped,
+            items: shaped,
+            pairs: shaped,
+            total: shaped.length
+        });
     } catch (error) {
         console.error('Get pairs error:', error);
         res.status(400).json({ error: error.message });
@@ -54,8 +68,10 @@ router.get('/', authenticateUser, async (req, res) => {
 
 /**
  * POST /api/pairs/request
- * Accepts `targetUserId` OR `userId` (which may be a username OR an _id).
- * Auto-fills languageA/languageB from the two users' preferences.
+ * Accepts `targetUserId` OR `userId` — the latter may be a Mongo _id
+ * or a username.
+ * Auto-fills languageA / languageB from the two users' preferences
+ * if the frontend doesn't send them.
  */
 router.post('/request', authenticateUser, async (req, res) => {
     const {
@@ -66,7 +82,6 @@ router.post('/request', authenticateUser, async (req, res) => {
         message
     } = req.body;
 
-    // Resolve target identifier — can be _id or username
     let resolvedTargetId = targetUserId || userId;
     if (!resolvedTargetId) {
         return res.status(400).json({
@@ -75,7 +90,7 @@ router.post('/request', authenticateUser, async (req, res) => {
     }
 
     try {
-        // If it's not a 24-hex string, treat it as a username
+        // Non-hex string → treat as username
         if (!/^[0-9a-fA-F]{24}$/.test(String(resolvedTargetId))) {
             const byUsername = await User.findOne({
                 username: String(resolvedTargetId).replace(/^@/, '').toLowerCase()
@@ -112,7 +127,7 @@ router.post('/request', authenticateUser, async (req, res) => {
         });
         if (existing) return res.status(400).json({ error: 'Pair already exists' });
 
-        // Auto-fill languages from the users' preferences
+        // Auto-fill languages from the two users' preferences
         let finalA = languageA;
         let finalB = languageB;
 
@@ -186,18 +201,15 @@ router.post('/match', authenticateUser, async (req, res) => {
 
         const myLearning = Array.isArray(languageLearning) && languageLearning.length
             ? languageLearning
-            : me.learningLanguages || [];
+            : (me.learningLanguages || []);
         const myTeaching = Array.isArray(languageTeaching) && languageTeaching.length
             ? languageTeaching
-            : me.teachingLanguages || [];
+            : (me.teachingLanguages || []);
 
-        // Fall back to the user's primary language if their learning list is empty
-        if (myLearning.length === 0 && me.language) {
-            myLearning.push(me.language);
-        }
-        if (myTeaching.length === 0 && me.language) {
-            myTeaching.push(me.language);
-        }
+        // Fall back to the user's primary language so a fresh signup can
+        // still be matched even before they've filled in their preferences.
+        if (myLearning.length === 0 && me.language) myLearning.push(me.language);
+        if (myTeaching.length === 0 && me.language) myTeaching.push(me.language);
 
         if (myLearning.length === 0 || myTeaching.length === 0) {
             return res.status(400).json({
@@ -446,7 +458,14 @@ router.get('/:pairId/messages', authenticateUser, async (req, res) => {
         pair.lastActivityAt = new Date();
         await pair.save();
 
-        res.json({ data: messages.reverse(), page, limit });
+        const ordered = messages.reverse();
+        res.json({
+            data: ordered,
+            items: ordered,
+            messages: ordered,
+            page,
+            limit
+        });
     } catch (error) {
         console.error('Get pair messages error:', error);
         res.status(400).json({ error: error.message });

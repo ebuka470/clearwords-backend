@@ -10,9 +10,24 @@ import { canJoinPod, getUserLimits } from '../middleware/tierGate.js';
 
 const router = express.Router();
 
+// ============================================
+// LEVEL NORMALIZATION
+// The frontend sends a numeric currentLevel (e.g. 3), but Pod.level
+// is an enum of tier strings. Map number → tier.
+// ============================================
+function normalizeLevel(l) {
+    if (typeof l === 'string' && ['beginner', 'intermediate', 'advanced'].includes(l)) {
+        return l;
+    }
+    const n = Number(l);
+    if (!isFinite(n) || n <= 0) return 'beginner';
+    if (n <= 15) return 'beginner';
+    if (n <= 35) return 'intermediate';
+    return 'advanced';
+}
+
 /**
  * GET /api/pods
- * List pods the user is in.
  */
 router.get('/', authenticateUser, async (req, res) => {
     try {
@@ -21,7 +36,7 @@ router.get('/', authenticateUser, async (req, res) => {
             isActive: true
         }).sort({ updatedAt: -1 });
 
-        res.json({ data: pods, total: pods.length });
+        res.json({ data: pods, items: pods, total: pods.length });
     } catch (error) {
         console.error('Get pods error:', error);
         res.status(400).json({ error: error.message });
@@ -54,7 +69,7 @@ router.post('/', authenticateUser, async (req, res) => {
             name,
             description: description || '',
             language,
-            level,
+            level: normalizeLevel(level),
             timezone: timezone || 'Africa/Lagos',
             creatorId: user._id,
             members: [{ userId: user._id, role: 'leader' }]
@@ -72,20 +87,16 @@ router.post('/', authenticateUser, async (req, res) => {
 
 /**
  * POST /api/pods/match
- * Auto-match into a pod. Accepts { language, level, timezone } or
- * nothing at all — will default from the user's profile + progress.
  */
 router.post('/match', authenticateUser, async (req, res) => {
     let { language, level, timezone } = req.body || {};
 
     try {
-        // Resolve language from the user if not provided
         if (!language) {
             const u = await User.findById(req.userId).select('language');
             language = u?.language || 'yoruba';
         }
 
-        // Resolve level from current progress if not provided
         if (!level) {
             const p = await Progress.findOne({ userId: req.userId, language });
             level = p?.currentLevel || 1;
@@ -94,6 +105,8 @@ router.post('/match', authenticateUser, async (req, res) => {
         if (!language || !level) {
             return res.status(400).json({ error: 'language and level are required' });
         }
+
+        const normalizedLevel = normalizeLevel(level);
 
         const user = await User.findById(req.userId);
 
@@ -117,7 +130,7 @@ router.post('/match', authenticateUser, async (req, res) => {
         const candidatePod = await Pod.findOneAndUpdate(
             {
                 language,
-                level,
+                level: normalizedLevel,
                 timezone: timezone || 'Africa/Lagos',
                 isActive: true,
                 isAutoMatched: true,
@@ -144,10 +157,10 @@ router.post('/match', authenticateUser, async (req, res) => {
         }
 
         const newPod = await Pod.create({
-            name: `${language} ${level} pod`,
+            name: `${language} ${normalizedLevel} pod`,
             description: 'Auto-generated pod',
             language,
-            level,
+            level: normalizedLevel,
             timezone: timezone || 'Africa/Lagos',
             creatorId: user._id,
             isAutoMatched: true,
@@ -166,8 +179,6 @@ router.post('/match', authenticateUser, async (req, res) => {
 
 /**
  * POST /api/pods/join-by-code
- * Body: { inviteCode }
- * Resolves the pod from the invite code and joins the user.
  */
 router.post('/join-by-code', authenticateUser, async (req, res) => {
     const { inviteCode } = req.body || {};
@@ -186,7 +197,6 @@ router.post('/join-by-code', authenticateUser, async (req, res) => {
             return res.status(404).json({ error: 'No pod found with that invite code' });
         }
 
-        // Re-use the same validation as /:podId/join
         if (pod.members.length >= pod.maxMembers) {
             return res.status(400).json({ error: 'Pod is full' });
         }
@@ -257,8 +267,6 @@ router.post('/join-by-code', authenticateUser, async (req, res) => {
 
 /**
  * POST /api/pods/:podId/join
- * Join by pod ID. Enforces invite code (if provided), language match,
- * tier limit, and 24h rejoin cooldown.
  */
 router.post('/:podId/join', authenticateUser, async (req, res) => {
     const { podId } = req.params;
@@ -399,7 +407,8 @@ router.get('/:podId/messages', authenticateUser, async (req, res) => {
             .skip(skip)
             .limit(limit);
 
-        res.json({ data: messages.reverse(), page, limit });
+        const ordered = messages.reverse();
+        res.json({ data: ordered, items: ordered, messages: ordered, page, limit });
     } catch (error) {
         console.error('Get pod messages error:', error);
         res.status(400).json({ error: error.message });
@@ -408,7 +417,6 @@ router.get('/:podId/messages', authenticateUser, async (req, res) => {
 
 /**
  * POST /api/pods/:podId/messages
- * Accepts `text` (canonical) or `content` (frontend alias).
  */
 router.post('/:podId/messages', authenticateUser, moderationMiddleware, async (req, res) => {
     const { podId } = req.params;
@@ -450,13 +458,11 @@ router.post('/:podId/messages', authenticateUser, moderationMiddleware, async (r
 
 /**
  * POST /api/pods/:podId/checkin
- * Accepts `lessonsCompleted` (number) or `note` (string) as a fallback.
  */
 router.post('/:podId/checkin', authenticateUser, async (req, res) => {
     const { podId } = req.params;
     const { lessonsCompleted, note } = req.body || {};
 
-    // Resolve lessons — accept a raw number OR a note string like "5 lessons"
     let resolvedLessons = lessonsCompleted;
     if (resolvedLessons == null && typeof note === 'string') {
         const match = note.match(/\d+/);

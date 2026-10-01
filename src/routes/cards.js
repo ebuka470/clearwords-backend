@@ -88,7 +88,12 @@ router.get('/mine', authenticateUser, async (req, res) => {
         const cards = await ProgressCard.find({ userId: req.userId })
             .sort({ createdAt: -1 })
             .limit(50);
-        res.json({ data: cards });
+        res.json({
+            data: cards,
+            items: cards,
+            cards: cards,
+            total: cards.length
+        });
     } catch (error) {
         console.error('Get cards error:', error);
         res.status(400).json({ error: error.message });
