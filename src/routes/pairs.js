@@ -24,7 +24,6 @@ function shapePair(pair, viewerId) {
         ? obj.userA._id.toString() === viewerId
         : obj.userA.toString() === viewerId;
     obj.partner = iAmA ? obj.userB : obj.userA;
-    obj.data = obj;
     return obj;
 }
 
