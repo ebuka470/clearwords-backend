@@ -18,8 +18,11 @@ const PairSchema = new mongoose.Schema({
     lastActivityAt: { type: Date, default: Date.now },
     endedAt: { type: Date, default: null },
     endedBy: { type: mongoose.Schema.Types.ObjectId, ref: 'User', default: null },
-    endReason: { type: String, enum: ['manual', 'report', 'inactive', 'auto'], default: null },
-
+    endReason: {
+    type: String,
+    enum: ['manual', 'report', 'inactive', 'auto', null],
+    default: null
+},
     // Feature flags per tier
     voiceEnabled: { type: Boolean, default: false },
     videoEnabled: { type: Boolean, default: false },
