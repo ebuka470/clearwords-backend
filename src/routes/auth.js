@@ -16,6 +16,30 @@ const router = express.Router();
 const TOKEN_LIFETIME = '30d';
 const BCRYPT_ROUNDS = 12;
 
+const VALID_ACCOUNT_TYPES = ['personal', 'family'];
+const VALID_LEARNING_FOR = ['myself', 'child', 'family', 'both'];
+const VALID_PLACEMENT_LEVELS = ['zero', 'few_words', 'some', 'little', 'comfortable'];
+const VALID_GOALS = [
+    'talk_family',
+    'understand',
+    'speak',
+    'pronunciation',
+    'culture',
+    'read_write',
+    'teach_child',
+    'visit_nigeria'
+];
+
+// How a self-reported placement level maps to a starting curriculum level.
+// "zero"/"few_words" start at 1, comfortable learners start at 20.
+const STARTING_LEVEL_BY_PLACEMENT = {
+    zero: 1,
+    few_words: 1,
+    some: 5,
+    little: 10,
+    comfortable: 20
+};
+
 // ============================================
 // HELPERS
 // ============================================
@@ -27,10 +51,6 @@ function issueToken(user) {
     );
 }
 
-/**
- * Strip sensitive fields from a User document before sending to client.
- * (Defense in depth — passwordHash already has select:false on the schema.)
- */
 function publicUser(user) {
     return {
         id: user._id,
@@ -39,6 +59,10 @@ function publicUser(user) {
         phone: user.phone,
         segment: user.segment,
         language: user.language,
+        accountType: user.accountType,
+        learningFor: user.learningFor,
+        goals: user.goals || [],
+        placementLevel: user.placementLevel,
         timezoneOffsetMinutes: user.timezoneOffsetMinutes,
         learningLanguages: user.learningLanguages || [],
         teachingLanguages: user.teachingLanguages || [],
@@ -50,6 +74,8 @@ function publicUser(user) {
         referralsRewarded: user.referralsRewarded || 0,
         referredBy: user.referredBy,
         streakFreezesAvailable: user.streakFreezesAvailable || 0,
+        savedWords: user.savedWords || [],
+        notificationsEnabled: !!user.notificationsEnabled,
         avatarUrl: user.avatarUrl,
         coverPhotoUrl: user.coverPhotoUrl,
         username: user.username,
@@ -79,7 +105,11 @@ router.post('/signup', async (req, res) => {
         language,
         primaryLanguage,
         phone,
-        referralCode
+        referralCode,
+        accountType,
+        learningFor,
+        goals,
+        level
     } = req.body;
 
     // --- Field alias resolution ---
@@ -99,6 +129,25 @@ router.post('/signup', async (req, res) => {
 
     const normalizedEmail = String(email).toLowerCase().trim();
 
+    // --- Onboarding field sanitization ---
+    const resolvedAccountType = VALID_ACCOUNT_TYPES.includes(accountType)
+        ? accountType
+        : 'personal';
+
+    const resolvedLearningFor = VALID_LEARNING_FOR.includes(learningFor)
+        ? learningFor
+        : 'myself';
+
+    const resolvedGoals = Array.isArray(goals)
+        ? goals.filter(g => VALID_GOALS.includes(g)).slice(0, 12)
+        : [];
+
+    const resolvedPlacement = VALID_PLACEMENT_LEVELS.includes(level)
+        ? level
+        : 'zero';
+
+    const startingLevel = STARTING_LEVEL_BY_PLACEMENT[resolvedPlacement] || 1;
+
     try {
         const existing = await User.findOne({ email: normalizedEmail });
         if (existing) {
@@ -113,20 +162,24 @@ router.post('/signup', async (req, res) => {
             fullName: resolvedFullName,
             phone: phone || '',
             segment: segment || 'young',
-            language: resolvedLanguage
+            language: resolvedLanguage,
+            accountType: resolvedAccountType,
+            learningFor: resolvedLearningFor,
+            goals: resolvedGoals,
+            placementLevel: resolvedPlacement
         });
 
         await Progress.create({
             userId: user._id,
-            language: language || 'yoruba',
+            language: resolvedLanguage,
             completedLevels: [],
             completedLessons: [],
             totalXP: 0,
             streak: 0,
-            currentLevel: 1
+            currentLevel: startingLevel
         });
 
-        // Referral redemption (non-fatal)
+        // ---- Referral redemption (non-fatal) ----
         let referralResult = null;
         if (referralCode) {
             try {
@@ -196,7 +249,6 @@ router.post('/signup', async (req, res) => {
 
 // ============================================
 // POST /api/auth/login
-// Rate-limited to slow down credential stuffing.
 // ============================================
 router.post(
     '/login',
@@ -247,7 +299,6 @@ router.post(
 
 // ============================================
 // POST /api/auth/change-password
-// Authenticated. User must supply current + new password.
 // ============================================
 router.post(
     '/change-password',
@@ -275,8 +326,6 @@ router.post(
         }
 
         try {
-            // Middleware loaded req.user without passwordHash (select:false).
-            // Re-fetch with the hash so we can compare.
             const user = await User.findById(req.userId).select('+passwordHash');
             if (!user) {
                 return res.status(404).json({ error: 'User not found' });
@@ -291,8 +340,6 @@ router.post(
             user.passwordChangedAt = new Date();
             await user.save();
 
-            // Issue a fresh token so this device stays logged in
-            // (the passwordChangedAt check would invalidate the old one).
             const freshToken = issueToken(user);
 
             res.json({
@@ -328,7 +375,6 @@ router.get('/me', async (req, res) => {
             return res.status(404).json({ error: 'User not found' });
         }
 
-        // Reject tokens issued before the last password change
         if (
             user.passwordChangedAt &&
             decoded.iat &&
@@ -355,8 +401,7 @@ router.get('/me', async (req, res) => {
 });
 
 // ============================================
-// POST /api/auth/test-token
-// DEV ONLY — never enabled in production.
+// POST /api/auth/test-token (DEV ONLY)
 // ============================================
 if (process.env.NODE_ENV !== 'production') {
     router.post('/test-token', async (req, res) => {

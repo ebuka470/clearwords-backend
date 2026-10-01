@@ -39,6 +39,39 @@ const UserSchema = new mongoose.Schema({
         enum: ['yoruba', 'hausa', 'igbo', 'urhobo', 'itsekiri', 'pidgin'],
         default: 'yoruba'
     },
+
+    // ============================================
+    // ONBOARDING PROFILE (persisted from signup)
+    // ============================================
+    accountType: {
+        type: String,
+        enum: ['personal', 'family'],
+        default: 'personal'
+    },
+    learningFor: {
+        type: String,
+        enum: ['myself', 'child', 'family', 'both'],
+        default: 'myself'
+    },
+    goals: [{
+        type: String,
+        enum: [
+            'talk_family',
+            'understand',
+            'speak',
+            'pronunciation',
+            'culture',
+            'read_write',
+            'teach_child',
+            'visit_nigeria'
+        ]
+    }],
+    placementLevel: {
+        type: String,
+        enum: ['zero', 'few_words', 'some', 'little', 'comfortable'],
+        default: 'zero'
+    },
+
     timezoneOffsetMinutes: { type: Number, default: null },
     learningLanguages: [{ type: String }],
     teachingLanguages: [{ type: String }],
@@ -49,15 +82,6 @@ const UserSchema = new mongoose.Schema({
     },
     subscriptionExpires: { type: Date, default: null },
     paystackCustomerCode: { type: String, default: null },
-    savedWords: [{
-    word: { type: String, required: true },
-    translation: { type: String, default: '' },
-    pronunciation: { type: String, default: '' },
-    example: { type: String, default: '' },
-    language: { type: String, default: 'yoruba' },
-    savedAt: { type: Date, default: Date.now }
-}],
-notificationsEnabled: { type: Boolean, default: false },
 
     // Referrals
     referralCode: { type: String, sparse: true },
@@ -68,6 +92,19 @@ notificationsEnabled: { type: Boolean, default: false },
 
     // Streak
     streakFreezesAvailable: { type: Number, default: 0, min: 0 },
+
+    // Saved words (used by learn tab)
+    savedWords: [{
+        word: { type: String, required: true },
+        translation: { type: String, default: '' },
+        pronunciation: { type: String, default: '' },
+        example: { type: String, default: '' },
+        language: { type: String, default: 'yoruba' },
+        savedAt: { type: Date, default: Date.now }
+    }],
+
+    // Notifications preference
+    notificationsEnabled: { type: Boolean, default: false },
 
     // Community stats
     podsJoined: { type: Number, default: 0 },
