@@ -51,6 +51,7 @@ Return ONLY valid JSON in this exact schema (no prose, no markdown fences):
 
 {
   "title": "Short lesson title",
+  "description": "one sentence description",
   "language": "${language}",
   "level": "${level}",
   "topic": "${topic}",
@@ -63,26 +64,33 @@ Return ONLY valid JSON in this exact schema (no prose, no markdown fences):
       "exampleTranslation": "translation of the example"
     }
   ],
-  "phrases": [
+  "dialogue": [
     {
-      "phrase": "useful phrase",
-      "translation": "translation",
-      "when": "when to use it"
+      "speaker": "A",
+      "text": "line in target language",
+      "translation": "translation of the line"
     }
   ],
-  "practiceQuestions": [
+  "culturalNotes": [
+    {
+      "title": "short title",
+      "content": "1-2 sentence explanation"
+    }
+  ],
+  "practiceExercises": [
     {
       "question": "question text",
       "options": ["a", "b", "c", "d"],
-      "correctIndex": 0,
+      "correctAnswer": 0,
       "explanation": "why this is correct"
     }
   ]
 }
 
 Constraints:
-- Exactly 5 vocabulary items.
-- Exactly 3 phrases.
+- Exactly 6 vocabulary items.
+- Exactly 4 dialogue lines.
+- Exactly 2 cultural notes.
 - Exactly 4 practice questions.
 - Keep everything practical and culturally appropriate for Nigerian languages.
 - Output must be parseable as JSON.`;
@@ -211,18 +219,56 @@ router.post('/chat', authenticateUser, async (req, res) => {
 
 // ============================================
 // POST /api/ai/custom-lesson
+// Accepts either structured { topic, language, level }
+// OR a raw { prompt } string — topic is extracted from it.
 // ============================================
 router.post('/custom-lesson', authenticateUser, async (req, res) => {
-    const { topic, language, level, context, timezoneOffsetMinutes } = req.body;
+    const {
+        topic,
+        language,
+        level,
+        context,
+        prompt,
+        timezoneOffsetMinutes
+    } = req.body;
 
-    if (!topic || !language || !level) {
-        return res.status(400).json({
-            error: 'topic, language, and level are required'
-        });
+    // --- Derive structured fields from a raw prompt when needed ---
+    let effectiveTopic = topic;
+    let effectiveLanguage = language;
+    let effectiveLevel = level;
+
+    if (!effectiveTopic && prompt) {
+        // Frontend's prompt shape:
+        //   Create a mini Yoruba lesson about "Ordering suya at a market". Return JSON with...
+        // Prefer the quoted substring (cleanest topic source).
+        const quoted = String(prompt).match(/"([^"]{2,120})"/);
+        if (quoted && quoted[1]) {
+            effectiveTopic = quoted[1].trim();
+        } else {
+            // Fall back to the first sentence, stripped of leading commands.
+            const cleaned = String(prompt).replace(/\s+/g, ' ').trim();
+            const firstSentence = cleaned.split(/[.\n]/)[0].slice(0, 200);
+            effectiveTopic = firstSentence
+                .replace(/^create a mini .* lesson about\s*/i, '')
+                .replace(/^create a .* lesson about\s*/i, '')
+                .trim() || 'General practice';
+        }
+    }
+
+    if (!effectiveLanguage) {
+        const u = await User.findById(req.userId).select('language');
+        effectiveLanguage = u?.language || 'yoruba';
+    }
+    if (!effectiveLevel) {
+        effectiveLevel = 'beginner';
+    }
+
+    if (!effectiveTopic) {
+        return res.status(400).json({ error: 'topic (or prompt) is required' });
     }
 
     const validLevels = ['beginner', 'intermediate', 'advanced'];
-    if (!validLevels.includes(level)) {
+    if (!validLevels.includes(effectiveLevel)) {
         return res.status(400).json({
             error: `level must be one of: ${validLevels.join(', ')}`
         });
@@ -250,17 +296,17 @@ router.post('/custom-lesson', authenticateUser, async (req, res) => {
             });
         }
 
-        const prompt = buildLessonPrompt({
-            topic,
-            language,
-            level,
+        const lessonPrompt = buildLessonPrompt({
+            topic: effectiveTopic,
+            language: effectiveLanguage,
+            level: effectiveLevel,
             nativeLanguage: user.language || 'english',
             context
         });
 
         const chatResponse = await client.chat.complete({
             model: 'mistral-small-2506',
-            messages: [{ role: 'user', content: prompt }],
+            messages: [{ role: 'user', content: lessonPrompt }],
             temperature: 0.7,
             maxTokens: 2000
         });
@@ -274,6 +320,16 @@ router.post('/custom-lesson', authenticateUser, async (req, res) => {
                 error: 'AI returned malformed lesson. Please try again.'
             });
         }
+
+        // Ensure the returned lesson has the fields the frontend expects
+        if (!lesson.title && effectiveTopic) lesson.title = effectiveTopic;
+        if (!lesson.description && effectiveTopic) {
+            lesson.description = `Custom lesson: ${effectiveTopic}`;
+        }
+        if (!Array.isArray(lesson.vocabulary)) lesson.vocabulary = [];
+        if (!Array.isArray(lesson.dialogue)) lesson.dialogue = [];
+        if (!Array.isArray(lesson.culturalNotes)) lesson.culturalNotes = [];
+        if (!Array.isArray(lesson.practiceExercises)) lesson.practiceExercises = [];
 
         const usage = await recordUsage(user, 'ai_custom_lesson', customLimit, dateKey);
 

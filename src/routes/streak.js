@@ -111,16 +111,32 @@ router.post('/freezes/buy', authenticateUser, async (req, res) => {
 // POST /api/streak/freezes/toggle-auto
 // ============================================
 router.post('/freezes/toggle-auto', authenticateUser, async (req, res) => {
-    const { language, autoApply } = req.body;
+    const { language: bodyLanguage, autoApply, enabled } = req.body || {};
 
-    if (!language || typeof autoApply !== 'boolean') {
-        return res.status(400).json({ error: 'language and autoApply (boolean) required' });
+    // Accept `autoApply` (backend canonical) OR `enabled` (frontend)
+    const resolvedAutoApply = typeof autoApply === 'boolean'
+        ? autoApply
+        : typeof enabled === 'boolean'
+            ? enabled
+            : null;
+
+    // Default language from user
+    let language = bodyLanguage;
+    if (!language) {
+        const u = await User.findById(req.userId).select('language');
+        language = u?.language || 'yoruba';
+    }
+
+    if (resolvedAutoApply === null) {
+        return res.status(400).json({
+            error: 'autoApply (or enabled) boolean is required'
+        });
     }
 
     try {
         const freeze = await StreakFreeze.findOneAndUpdate(
             { userId: req.userId, language },
-            { autoApply },
+            { autoApply: resolvedAutoApply },
             { new: true, upsert: true, setDefaultsOnInsert: true }
         );
 

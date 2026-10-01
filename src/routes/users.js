@@ -22,24 +22,21 @@ router.put(
             bio,
             location,
             language,
+            primaryLanguage,
             segment,
             isPublic,
             learningLanguages,
             teachingLanguages,
-            timezoneOffsetMinutes
+            timezoneOffsetMinutes,
+            savedWords,
+            notificationsEnabled
         } = req.body;
 
         try {
-            const user =
-                await User.findById(
-                    req.userId
-                );
+            const user = await User.findById(req.userId);
 
             if (!user) {
-                return res.status(404).json({
-                    error:
-                        'User not found'
-                });
+                return res.status(404).json({ error: 'User not found' });
             }
 
             // ------------------------------------
@@ -110,79 +107,37 @@ router.put(
             // Basic profile fields
             // ------------------------------------
 
-            if (
-                typeof fullName ===
-                    'string' &&
-                fullName.trim()
-            ) {
-                user.fullName =
-                    fullName.trim();
+            if (typeof fullName === 'string' && fullName.trim()) {
+                user.fullName = fullName.trim();
+            }
+            if (typeof bio === 'string') user.bio = bio.trim();
+            if (typeof location === 'string') user.location = location.trim();
+
+            // Language: accept either name
+            const resolvedLanguage = language || primaryLanguage;
+            if (typeof resolvedLanguage === 'string') user.language = resolvedLanguage;
+
+            if (typeof segment === 'string') user.segment = segment;
+            if (typeof isPublic === 'boolean') user.isPublic = isPublic;
+
+            if (Array.isArray(learningLanguages)) user.learningLanguages = learningLanguages;
+            if (Array.isArray(teachingLanguages)) user.teachingLanguages = teachingLanguages;
+            if (typeof timezoneOffsetMinutes === 'number') user.timezoneOffsetMinutes = timezoneOffsetMinutes;
+
+            // Saved words: allow full replacement (used by /learn save-word button)
+            if (Array.isArray(savedWords)) {
+                user.savedWords = savedWords.slice(0, 500).map(w => ({
+                    word: String(w.word || '').slice(0, 100),
+                    translation: String(w.translation || '').slice(0, 200),
+                    pronunciation: String(w.pronunciation || '').slice(0, 100),
+                    example: String(w.example || '').slice(0, 300),
+                    language: String(w.language || user.language).slice(0, 40),
+                    savedAt: w.savedAt ? new Date(w.savedAt) : new Date()
+                })).filter(w => w.word);
             }
 
-            if (
-                typeof bio === 'string'
-            ) {
-                user.bio =
-                    bio.trim();
-            }
-
-            if (
-                typeof location === 'string'
-            ) {
-                user.location =
-                    location.trim();
-            }
-
-            if (
-                typeof language === 'string'
-            ) {
-                user.language =
-                    language;
-            }
-
-            if (
-                typeof segment === 'string'
-            ) {
-                user.segment =
-                    segment;
-            }
-
-            if (
-                typeof isPublic ===
-                'boolean'
-            ) {
-                user.isPublic =
-                    isPublic;
-            }
-
-            // ------------------------------------
-            // Languages
-            // ------------------------------------
-
-            if (
-                Array.isArray(
-                    learningLanguages
-                )
-            ) {
-                user.learningLanguages =
-                    learningLanguages;
-            }
-
-            if (
-                Array.isArray(
-                    teachingLanguages
-                )
-            ) {
-                user.teachingLanguages =
-                    teachingLanguages;
-            }
-
-            if (
-                typeof timezoneOffsetMinutes ===
-                'number'
-            ) {
-                user.timezoneOffsetMinutes =
-                    timezoneOffsetMinutes;
+            if (typeof notificationsEnabled === 'boolean') {
+                user.notificationsEnabled = notificationsEnabled;
             }
 
             await user.save();

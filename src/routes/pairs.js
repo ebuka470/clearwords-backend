@@ -31,11 +31,21 @@ router.get('/', authenticateUser, async (req, res) => {
             $or: [{ userA: req.userId }, { userB: req.userId }],
             status: 'active'
         })
-        .populate('userA', 'fullName username avatarUrl learningLanguages teachingLanguages')
-        .populate('userB', 'fullName username avatarUrl learningLanguages teachingLanguages')
+        .populate('userA', 'fullName username avatarUrl learningLanguages teachingLanguages language')
+        .populate('userB', 'fullName username avatarUrl learningLanguages teachingLanguages language')
         .sort({ lastActivityAt: -1 });
 
-        res.json({ data: pairs, total: pairs.length });
+        // Shape the response so each pair includes a `partner` field —
+        // this is what the frontend renders directly.
+        const shaped = pairs.map(p => {
+            const obj = p.toObject();
+            const iAmA = obj.userA._id.toString() === req.userId;
+            obj.partner = iAmA ? obj.userB : obj.userA;
+            obj.data = obj; // frontend reads .data fallback too
+            return obj;
+        });
+
+        res.json({ data: shaped, total: shaped.length });
     } catch (error) {
         console.error('Get pairs error:', error);
         res.status(400).json({ error: error.message });
@@ -44,21 +54,44 @@ router.get('/', authenticateUser, async (req, res) => {
 
 /**
  * POST /api/pairs/request
+ * Accepts `targetUserId` OR `userId` (which may be a username OR an _id).
+ * Auto-fills languageA/languageB from the two users' preferences.
  */
 router.post('/request', authenticateUser, async (req, res) => {
-    const { targetUserId, languageA, languageB } = req.body;
+    const {
+        targetUserId,
+        userId,
+        languageA,
+        languageB,
+        message
+    } = req.body;
 
-    if (!targetUserId || !languageA || !languageB) {
-        return res.status(400).json({ error: 'targetUserId, languageA, languageB are required' });
-    }
-
-    if (targetUserId === req.userId) {
-        return res.status(400).json({ error: 'Cannot pair with yourself' });
+    // Resolve target identifier — can be _id or username
+    let resolvedTargetId = targetUserId || userId;
+    if (!resolvedTargetId) {
+        return res.status(400).json({
+            error: 'targetUserId (or userId) is required'
+        });
     }
 
     try {
+        // If it's not a 24-hex string, treat it as a username
+        if (!/^[0-9a-fA-F]{24}$/.test(String(resolvedTargetId))) {
+            const byUsername = await User.findOne({
+                username: String(resolvedTargetId).replace(/^@/, '').toLowerCase()
+            });
+            if (!byUsername) {
+                return res.status(404).json({ error: 'No learner found with that username' });
+            }
+            resolvedTargetId = byUsername._id;
+        }
+
+        if (String(resolvedTargetId) === String(req.userId)) {
+            return res.status(400).json({ error: 'Cannot pair with yourself' });
+        }
+
         const user = await User.findById(req.userId);
-        const target = await User.findById(targetUserId);
+        const target = await User.findById(resolvedTargetId);
         if (!target) return res.status(404).json({ error: 'Target user not found' });
         if (target.isBanned) return res.status(403).json({ error: 'Target user is unavailable' });
 
@@ -73,26 +106,48 @@ router.post('/request', authenticateUser, async (req, res) => {
         const existing = await Pair.findOne({
             status: { $in: ['pending', 'active'] },
             $or: [
-                { userA: req.userId, userB: targetUserId },
-                { userA: targetUserId, userB: req.userId }
+                { userA: req.userId, userB: resolvedTargetId },
+                { userA: resolvedTargetId, userB: req.userId }
             ]
         });
         if (existing) return res.status(400).json({ error: 'Pair already exists' });
 
-        // Effective flags = AND of both users' entitlements
+        // Auto-fill languages from the users' preferences
+        let finalA = languageA;
+        let finalB = languageB;
+
+        if (!finalA || !finalB) {
+            const myLearning = user.learningLanguages || [];
+            const myTeaching = user.teachingLanguages || [];
+            const theirLearning = target.learningLanguages || [];
+            const theirTeaching = target.teachingLanguages || [];
+
+            finalA = finalA
+                || myLearning.find(l => theirTeaching.includes(l))
+                || myLearning[0]
+                || user.language
+                || 'yoruba';
+
+            finalB = finalB
+                || myTeaching.find(l => theirLearning.includes(l))
+                || myTeaching[0]
+                || target.language
+                || 'english';
+        }
+
         const flags = computePairFlags(user, target);
 
         const pair = await Pair.create({
             userA: req.userId,
-            userB: targetUserId,
-            languageA,
-            languageB,
+            userB: resolvedTargetId,
+            languageA: finalA,
+            languageB: finalB,
             status: 'pending',
             ...flags
         });
 
         await Notification.create({
-            userId: targetUserId,
+            userId: resolvedTargetId,
             type: 'pair_matched',
             sourceId: user._id,
             sourceUsername: user.username || 'User',
@@ -110,9 +165,14 @@ router.post('/request', authenticateUser, async (req, res) => {
 
 /**
  * POST /api/pairs/match
+ * Auto-match the current user with the best candidate.
  */
 router.post('/match', authenticateUser, async (req, res) => {
-    const { languageLearning, languageTeaching, timezoneOffsetMinutes } = req.body || {};
+    const {
+        languageLearning,
+        languageTeaching,
+        timezoneOffsetMinutes
+    } = req.body || {};
 
     try {
         const me = await User.findById(req.userId);
@@ -130,6 +190,14 @@ router.post('/match', authenticateUser, async (req, res) => {
         const myTeaching = Array.isArray(languageTeaching) && languageTeaching.length
             ? languageTeaching
             : me.teachingLanguages || [];
+
+        // Fall back to the user's primary language if their learning list is empty
+        if (myLearning.length === 0 && me.language) {
+            myLearning.push(me.language);
+        }
+        if (myTeaching.length === 0 && me.language) {
+            myTeaching.push(me.language);
+        }
 
         if (myLearning.length === 0 || myTeaching.length === 0) {
             return res.status(400).json({
@@ -219,7 +287,6 @@ router.post('/match', authenticateUser, async (req, res) => {
         const languageA = best.sharedLearning[0] || myLearning[0];
         const languageB = best.sharedTeaching[0] || myTeaching[0];
 
-        // Effective flags = AND of both users
         const flags = computePairFlags(me, target);
 
         const pair = await Pair.create({
@@ -293,7 +360,6 @@ router.post('/:pairId/accept', authenticateUser, async (req, res) => {
             return res.status(400).json({ error: 'Pair is not pending' });
         }
 
-        // Recompute flags on accept (in case a tier changed between request and accept)
         const userA = await User.findById(pair.userA);
         const userB = await User.findById(pair.userB);
         if (userA && userB) {
@@ -321,7 +387,7 @@ router.post('/:pairId/accept', authenticateUser, async (req, res) => {
  */
 router.delete('/:pairId', authenticateUser, async (req, res) => {
     const { pairId } = req.params;
-    const { reason } = req.body;
+    const { reason } = req.body || {};
 
     try {
         const pair = await Pair.findById(pairId);
@@ -389,12 +455,16 @@ router.get('/:pairId/messages', authenticateUser, async (req, res) => {
 
 /**
  * POST /api/pairs/:pairId/messages
+ * Accepts `text` (canonical) or `content` (frontend alias).
  */
 router.post('/:pairId/messages', authenticateUser, moderationMiddleware, async (req, res) => {
     const { pairId } = req.params;
-    const { text } = req.body;
+    const { text, content } = req.body;
 
-    if (!text) return res.status(400).json({ error: 'text is required' });
+    const messageText = text || content;
+    if (!messageText) {
+        return res.status(400).json({ error: 'text (or content) is required' });
+    }
 
     try {
         const pair = await Pair.findById(pairId);
@@ -411,7 +481,7 @@ router.post('/:pairId/messages', authenticateUser, moderationMiddleware, async (
         const message = await PairMessage.create({
             pairId,
             senderId: req.userId,
-            text
+            text: messageText
         });
 
         pair.lastActivityAt = new Date();
@@ -426,6 +496,7 @@ router.post('/:pairId/messages', authenticateUser, moderationMiddleware, async (
 
 /**
  * POST /api/pairs/:pairId/call/start
+ * Session gate for voice/video calls.
  */
 router.post('/:pairId/call/start', authenticateUser, async (req, res) => {
     const { pairId } = req.params;

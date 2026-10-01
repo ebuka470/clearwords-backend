@@ -2,6 +2,7 @@ import express from 'express';
 import Pod from '../models/Pod.js';
 import PodMessage from '../models/PodMessage.js';
 import User from '../models/User.js';
+import Progress from '../models/Progress.js';
 import Notification from '../models/Notification.js';
 import { authenticateUser } from '../middleware/auth.js';
 import { moderationMiddleware } from '../middleware/moderation.js';
@@ -11,6 +12,7 @@ const router = express.Router();
 
 /**
  * GET /api/pods
+ * List pods the user is in.
  */
 router.get('/', authenticateUser, async (req, res) => {
     try {
@@ -28,7 +30,7 @@ router.get('/', authenticateUser, async (req, res) => {
 
 /**
  * POST /api/pods
- * Create a pod (Premium/Immersive only)
+ * Create a pod (Premium / Immersive only).
  */
 router.post('/', authenticateUser, async (req, res) => {
     const { name, description, language, level, timezone } = req.body;
@@ -70,15 +72,29 @@ router.post('/', authenticateUser, async (req, res) => {
 
 /**
  * POST /api/pods/match
+ * Auto-match into a pod. Accepts { language, level, timezone } or
+ * nothing at all — will default from the user's profile + progress.
  */
 router.post('/match', authenticateUser, async (req, res) => {
-    const { language, level, timezone } = req.body;
-
-    if (!language || !level) {
-        return res.status(400).json({ error: 'language and level are required' });
-    }
+    let { language, level, timezone } = req.body || {};
 
     try {
+        // Resolve language from the user if not provided
+        if (!language) {
+            const u = await User.findById(req.userId).select('language');
+            language = u?.language || 'yoruba';
+        }
+
+        // Resolve level from current progress if not provided
+        if (!level) {
+            const p = await Progress.findOne({ userId: req.userId, language });
+            level = p?.currentLevel || 1;
+        }
+
+        if (!language || !level) {
+            return res.status(400).json({ error: 'language and level are required' });
+        }
+
         const user = await User.findById(req.userId);
 
         const canJoin = await canJoinPod(user);
@@ -149,12 +165,104 @@ router.post('/match', authenticateUser, async (req, res) => {
 });
 
 /**
+ * POST /api/pods/join-by-code
+ * Body: { inviteCode }
+ * Resolves the pod from the invite code and joins the user.
+ */
+router.post('/join-by-code', authenticateUser, async (req, res) => {
+    const { inviteCode } = req.body || {};
+
+    if (!inviteCode) {
+        return res.status(400).json({ error: 'inviteCode is required' });
+    }
+
+    try {
+        const pod = await Pod.findOne({
+            inviteCode: String(inviteCode).trim().toUpperCase(),
+            isActive: true
+        });
+
+        if (!pod) {
+            return res.status(404).json({ error: 'No pod found with that invite code' });
+        }
+
+        // Re-use the same validation as /:podId/join
+        if (pod.members.length >= pod.maxMembers) {
+            return res.status(400).json({ error: 'Pod is full' });
+        }
+
+        if (pod.members.some(m => m.userId.toString() === req.userId)) {
+            return res.status(400).json({ error: 'Already a member' });
+        }
+
+        const user = await User.findById(req.userId);
+        if (!user) return res.status(404).json({ error: 'User not found' });
+        if (user.isBanned) return res.status(403).json({ error: 'Account is banned' });
+
+        const recentLeave = (pod.formerMembers || []).find(
+            fm => fm.userId && fm.userId.toString() === req.userId
+                && Date.now() - new Date(fm.leftAt).getTime() < 24 * 60 * 60 * 1000
+        );
+        if (recentLeave) {
+            return res.status(429).json({
+                error: 'You recently left this pod. Try rejoining in a few hours.'
+            });
+        }
+
+        const isLearning = (user.learningLanguages || []).includes(pod.language);
+        const isTeaching = (user.teachingLanguages || []).includes(pod.language);
+        const isPrimary = user.language === pod.language;
+        if (!isLearning && !isTeaching && !isPrimary) {
+            return res.status(400).json({
+                error: `This pod is for ${pod.language} learners. Update your languages to join.`
+            });
+        }
+
+        const canJoin = await canJoinPod(user);
+        if (!canJoin) {
+            return res.status(403).json({
+                error: 'Pod limit reached for your tier',
+                currentTier: user.subscriptionTier
+            });
+        }
+
+        pod.members.push({ userId: user._id, role: 'member' });
+        pod.formerMembers = (pod.formerMembers || []).filter(
+            fm => !fm.userId || fm.userId.toString() !== req.userId
+        );
+        await pod.save();
+
+        user.podsJoined = (user.podsJoined || 0) + 1;
+        await user.save();
+
+        const leader = pod.members.find(m => m.role === 'leader');
+        if (leader && leader.userId.toString() !== req.userId) {
+            await Notification.create({
+                userId: leader.userId,
+                type: 'pod_milestone',
+                sourceId: user._id,
+                sourceUsername: user.username || 'User',
+                sourceAvatar: user.avatarUrl || '',
+                podId: pod._id,
+                content: `${user.fullName || 'Someone'} joined your pod "${pod.name}"`
+            });
+        }
+
+        res.json({ success: true, pod });
+    } catch (error) {
+        console.error('Join by code error:', error);
+        res.status(400).json({ error: error.message });
+    }
+});
+
+/**
  * POST /api/pods/:podId/join
- * Enforces language match, tier limit, and 24h rejoin cooldown
+ * Join by pod ID. Enforces invite code (if provided), language match,
+ * tier limit, and 24h rejoin cooldown.
  */
 router.post('/:podId/join', authenticateUser, async (req, res) => {
     const { podId } = req.params;
-    const { inviteCode } = req.body;
+    const { inviteCode } = req.body || {};
 
     try {
         const pod = await Pod.findById(podId);
@@ -178,7 +286,6 @@ router.post('/:podId/join', authenticateUser, async (req, res) => {
         if (!user) return res.status(404).json({ error: 'User not found' });
         if (user.isBanned) return res.status(403).json({ error: 'Account is banned' });
 
-        // 24h rejoin cooldown
         const recentLeave = (pod.formerMembers || []).find(
             fm => fm.userId && fm.userId.toString() === req.userId
                 && Date.now() - new Date(fm.leftAt).getTime() < 24 * 60 * 60 * 1000
@@ -189,18 +296,15 @@ router.post('/:podId/join', authenticateUser, async (req, res) => {
             });
         }
 
-        // Language check
         const isLearning = (user.learningLanguages || []).includes(pod.language);
         const isTeaching = (user.teachingLanguages || []).includes(pod.language);
         const isPrimary = user.language === pod.language;
-
         if (!isLearning && !isTeaching && !isPrimary) {
             return res.status(400).json({
                 error: `This pod is for ${pod.language} learners. Update your languages to join.`
             });
         }
 
-        // Tier limit
         const canJoin = await canJoinPod(user);
         if (!canJoin) {
             return res.status(403).json({
@@ -304,12 +408,16 @@ router.get('/:podId/messages', authenticateUser, async (req, res) => {
 
 /**
  * POST /api/pods/:podId/messages
+ * Accepts `text` (canonical) or `content` (frontend alias).
  */
 router.post('/:podId/messages', authenticateUser, moderationMiddleware, async (req, res) => {
     const { podId } = req.params;
-    const { text } = req.body;
+    const { text, content } = req.body;
 
-    if (!text) return res.status(400).json({ error: 'text is required' });
+    const messageText = text || content;
+    if (!messageText) {
+        return res.status(400).json({ error: 'text (or content) is required' });
+    }
 
     try {
         const pod = await Pod.findById(podId);
@@ -326,7 +434,7 @@ router.post('/:podId/messages', authenticateUser, moderationMiddleware, async (r
             authorId: user._id,
             authorUsername: user.username || user.email.split('@')[0],
             authorAvatar: user.avatarUrl || '',
-            text,
+            text: messageText,
             type: 'text'
         });
 
@@ -342,12 +450,21 @@ router.post('/:podId/messages', authenticateUser, moderationMiddleware, async (r
 
 /**
  * POST /api/pods/:podId/checkin
+ * Accepts `lessonsCompleted` (number) or `note` (string) as a fallback.
  */
 router.post('/:podId/checkin', authenticateUser, async (req, res) => {
     const { podId } = req.params;
-    const { lessonsCompleted } = req.body;
+    const { lessonsCompleted, note } = req.body || {};
 
-    if (typeof lessonsCompleted !== 'number' || lessonsCompleted < 0) {
+    // Resolve lessons — accept a raw number OR a note string like "5 lessons"
+    let resolvedLessons = lessonsCompleted;
+    if (resolvedLessons == null && typeof note === 'string') {
+        const match = note.match(/\d+/);
+        resolvedLessons = match ? parseInt(match[0], 10) : 0;
+    }
+    if (resolvedLessons == null) resolvedLessons = 0;
+
+    if (typeof resolvedLessons !== 'number' || resolvedLessons < 0) {
         return res.status(400).json({ error: 'lessonsCompleted must be a non-negative number' });
     }
 
@@ -382,7 +499,7 @@ router.post('/:podId/checkin', authenticateUser, async (req, res) => {
             authorId: req.userId,
             authorUsername: user.username || user.email.split('@')[0],
             authorAvatar: user.avatarUrl || '',
-            text: `✅ Checked in: ${lessonsCompleted} lesson${lessonsCompleted === 1 ? '' : 's'} this week`,
+            text: `✅ Checked in: ${resolvedLessons} lesson${resolvedLessons === 1 ? '' : 's'} this week`,
             type: 'checkin'
         });
 
@@ -407,8 +524,8 @@ router.post('/:podId/checkin', authenticateUser, async (req, res) => {
             await Notification.insertMany(notifications);
         }
 
-        pod.weeklyXP += lessonsCompleted;
-        pod.totalXP += lessonsCompleted;
+        pod.weeklyXP += resolvedLessons;
+        pod.totalXP += resolvedLessons;
         await pod.save();
 
         res.status(201).json({

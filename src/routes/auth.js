@@ -73,11 +73,21 @@ router.post('/signup', async (req, res) => {
         email,
         password,
         fullName,
+        firstName,
+        lastName,
         segment,
         language,
+        primaryLanguage,
         phone,
         referralCode
     } = req.body;
+
+    // --- Field alias resolution ---
+    const resolvedFullName = (fullName && String(fullName).trim())
+        || [firstName, lastName].filter(Boolean).join(' ').trim()
+        || (email ? String(email).split('@')[0] : '');
+
+    const resolvedLanguage = language || primaryLanguage || 'yoruba';
 
     if (!email || !password) {
         return res.status(400).json({ error: 'email and password are required' });
@@ -100,10 +110,10 @@ router.post('/signup', async (req, res) => {
         const user = await User.create({
             email: normalizedEmail,
             passwordHash,
-            fullName: fullName || normalizedEmail.split('@')[0],
+            fullName: resolvedFullName,
             phone: phone || '',
             segment: segment || 'young',
-            language: language || 'yoruba'
+            language: resolvedLanguage
         });
 
         await Progress.create({

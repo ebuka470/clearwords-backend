@@ -122,8 +122,9 @@ router.get('/', authenticateUser, async (req, res) => {
  */
 router.post('/complete-lesson', authenticateUser, async (req, res) => {
     const {
-        language,
+        language: bodyLanguage,
         levelId,
+        levelNumber,
         lessonId,
         perfect = false,
         timeSpentSeconds = 0,
@@ -132,13 +133,23 @@ router.post('/complete-lesson', authenticateUser, async (req, res) => {
         timezoneOffsetMinutes
     } = req.body;
 
-    if (!language || levelId == null || !lessonId) {
+    // Auto-fill language from user if frontend didn't send it
+    let language = bodyLanguage;
+    if (!language) {
+        const u = await User.findById(req.userId).select('language');
+        language = u?.language || 'yoruba';
+    }
+
+    // Accept levelNumber as alias for levelId
+    const resolvedLevel = levelId != null ? levelId : levelNumber;
+
+    if (!language || resolvedLevel == null || !lessonId) {
         return res.status(400).json({
-            error: 'language, levelId, and lessonId are required'
+            error: 'language, levelId (or levelNumber), and lessonId are required'
         });
     }
 
-    const safeLevel = Number(levelId);
+    const safeLevel = Number(resolvedLevel);
     const safeTime = Math.min(Math.max(0, Number(timeSpentSeconds) || 0), 3600);
     const safeMistakes = Math.min(Math.max(0, Number(mistakesCount) || 0), 100);
 

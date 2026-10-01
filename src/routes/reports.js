@@ -14,11 +14,53 @@ const AUTO_BAN_THRESHOLD = 3;
  * Report a user, message, or pair
  */
 router.post('/', authenticateUser, async (req, res) => {
-    const { targetType, targetId, targetUserId, reason, description } = req.body;
+    const {
+        targetType,
+        targetId,
+        targetUserId,
+        reason,
+        description,
+        details,
+        evidence
+    } = req.body;
 
-    if (!targetType || !targetId || !targetUserId || !reason) {
-        return res.status(400).json({ error: 'targetType, targetId, targetUserId, reason are required' });
+    if (!targetType || !targetId || !reason) {
+        return res.status(400).json({
+            error: 'targetType, targetId, reason are required'
+        });
     }
+
+    const resolvedDescription = description || details || '';
+
+    try {
+        // Resolve targetUserId automatically when reporting a pair or
+        // a pair/pod message — the reported user is whoever is on the
+        // other side from the reporter.
+        let resolvedTargetUserId = targetUserId;
+
+        if (!resolvedTargetUserId && targetType === 'pair') {
+            const pair = await Pair.findById(targetId);
+            if (pair) {
+                const other = pair.userA.toString() === req.userId ? pair.userB : pair.userA;
+                resolvedTargetUserId = other;
+            }
+        }
+
+        if (!resolvedTargetUserId && targetType === 'pair_message') {
+            const msg = await PairMessage.findById(targetId);
+            if (msg) resolvedTargetUserId = msg.senderId;
+        }
+
+        if (!resolvedTargetUserId && targetType === 'pod_message') {
+            const msg = await PodMessage.findById(targetId);
+            if (msg) resolvedTargetUserId = msg.authorId;
+        }
+
+        if (!resolvedTargetUserId) {
+            return res.status(400).json({
+                error: 'Could not resolve the reported user for this target'
+            });
+        }
 
     try {
         const report = await Report.create({

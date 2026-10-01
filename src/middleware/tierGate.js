@@ -4,8 +4,8 @@ import Pod from '../models/Pod.js';
 
 export const TIER_LIMITS = {
     free: {
-        pairs: 1,
-        pods: 3,
+        pairs: 5,
+        pods: 5 ,
         canCreatePod: false,
         voice: false,
         video: false,
@@ -13,8 +13,8 @@ export const TIER_LIMITS = {
         lessonsPerLanguage: 50
     },
     premium: {
-        pairs: 5,
-        pods: 3,
+        pairs: 10,
+        pods: 10,
         canCreatePod: true,
         voice: true,
         video: false,
@@ -23,7 +23,7 @@ export const TIER_LIMITS = {
     },
     immersive: {
         pairs: Infinity,
-        pods: 3,
+        pods: Infinity ,
         canCreatePod: true,
         voice: true,
         video: true,

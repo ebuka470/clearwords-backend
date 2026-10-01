@@ -49,6 +49,15 @@ const UserSchema = new mongoose.Schema({
     },
     subscriptionExpires: { type: Date, default: null },
     paystackCustomerCode: { type: String, default: null },
+    savedWords: [{
+    word: { type: String, required: true },
+    translation: { type: String, default: '' },
+    pronunciation: { type: String, default: '' },
+    example: { type: String, default: '' },
+    language: { type: String, default: 'yoruba' },
+    savedAt: { type: Date, default: Date.now }
+}],
+notificationsEnabled: { type: Boolean, default: false },
 
     // Referrals
     referralCode: { type: String, sparse: true },

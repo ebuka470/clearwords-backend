@@ -106,11 +106,21 @@ router.get('/plans', (req, res) => {
 // POST /api/subscription/initialize
 // ============================================
 router.post('/initialize', authenticateUser, async (req, res) => {
-    const { tier, billingCycle = 'monthly', currency = 'NGN' } = req.body;
+    let { tier, billingCycle = 'monthly', currency = 'NGN', planId } = req.body;
+
+    // Frontend may send planId like 'premium_monthly' or 'immersive_yearly'
+    if (!tier && planId) {
+        const parts = String(planId).toLowerCase().split('_');
+        tier = parts[0];
+        if (parts[1] === 'monthly' || parts[1] === 'yearly') {
+            billingCycle = parts[1];
+        }
+    }
 
     if (!tier || !['premium', 'immersive'].includes(tier)) {
-        return res.status(400).json({ error: 'tier must be premium or immersive' });
+        return res.status(400).json({ error: 'tier (or planId) must be premium or immersive' });
     }
+
 
     if (!['monthly', 'yearly'].includes(billingCycle)) {
         return res.status(400).json({ error: 'billingCycle must be monthly or yearly' });

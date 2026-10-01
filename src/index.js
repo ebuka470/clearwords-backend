@@ -70,8 +70,11 @@ app.use(cors({
         if (!origin) return callback(null, true);
         const allowedOrigins = [
             'https://clearwords.vercel.app',
+            'https://clearwords-updates.vercel.app',
+            'https://clearwords-versions.vercel.app',
             'https://clearwords.com.ng',
             'https://www.clearwords.com.ng',
+            'http://localhost:8080',
             'http://localhost:3000',
             'http://localhost:5173',
             'http://localhost:8081',
