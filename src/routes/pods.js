@@ -91,20 +91,26 @@ router.post('/', authenticateUser, async (req, res) => {
 /**
  * POST /api/pods/match
  */
+/**
+ * POST /api/pods/match
+ * Auto-match the current user into a pod.
+ *
+ * Uses explicit read → modify → save instead of findOneAndUpdate so
+ * we can verify the write actually persisted before returning.
+ */
 router.post('/match', authenticateUser, async (req, res) => {
     let { language, level, timezone } = req.body || {};
 
     try {
+        // ---- Resolve defaults ----
         if (!language) {
             const u = await User.findById(req.userId).select('language');
             language = u?.language || 'yoruba';
         }
-
         if (!level) {
             const p = await Progress.findOne({ userId: req.userId, language });
             level = p?.currentLevel || 1;
         }
-
         if (!language || !level) {
             return res.status(400).json({ error: 'language and level are required' });
         }
@@ -112,7 +118,9 @@ router.post('/match', authenticateUser, async (req, res) => {
         const normalizedLevel = normalizeLevel(level);
 
         const user = await User.findById(req.userId);
+        if (!user) return res.status(404).json({ error: 'User not found' });
 
+        // ---- Tier gate ----
         const canJoin = await canJoinPod(user);
         if (!canJoin) {
             return res.status(403).json({
@@ -121,47 +129,70 @@ router.post('/match', authenticateUser, async (req, res) => {
             });
         }
 
+        // ---- Already in a pod for this language? ----
         const alreadyIn = await Pod.findOne({
             language,
             isActive: true,
             'members.userId': user._id
         });
         if (alreadyIn) {
-            return res.json({ matched: false, pod: alreadyIn, reason: 'already_in_pod' });
+            return res.json({
+                matched: false,
+                pod: alreadyIn,
+                reason: 'already_in_pod'
+            });
         }
 
-        const candidatePod = await Pod.findOneAndUpdate(
-            {
-                language,
-                level: normalizedLevel,
-                timezone: timezone || 'Africa/Lagos',
-                isActive: true,
-                isAutoMatched: true,
-                $expr: { $lt: [{ $size: '$members' }, '$maxMembers'] }
-            },
-            {
-                $push: { members: { userId: user._id, role: 'member' } }
-            },
-            { new: true, sort: { createdAt: 1 } }
-        );
+        // ---- Find a candidate pod with space ----
+        const candidatePod = await Pod.findOne({
+            language,
+            level: normalizedLevel,
+            timezone: timezone || 'Africa/Lagos',
+            isActive: true,
+            isAutoMatched: true,
+            $expr: { $lt: [{ $size: '$members' }, '$maxMembers'] }
+        }).sort({ createdAt: 1 });
 
         if (candidatePod) {
-            // ---- VERIFY the membership actually persisted ----
-            // findOneAndUpdate with $push occasionally reports success
-            // without the change landing if there's a write concern race.
-            // Re-fetch and confirm; fall back to an explicit save if not.
-            const check = await Pod.findById(candidatePod._id).select('members');
-            const isMember = check.members.some(m =>
-                m.userId.toString() === user._id.toString()
+            // Guard against a race: re-check membership before pushing
+            const alreadyMember = candidatePod.members.some(
+                m => m.userId.toString() === user._id.toString()
             );
 
-            if (!isMember) {
-                console.warn('matchPod: $push did not persist — falling back to save', {
-                    podId: candidatePod._id.toString(),
-                    userId: user._id.toString()
+            if (!alreadyMember) {
+                candidatePod.members.push({
+                    userId: user._id,
+                    role: 'member'
                 });
-                check.members.push({ userId: user._id, role: 'member' });
-                await check.save();
+                await candidatePod.save();
+            }
+
+            // ---- VERIFY the write landed ----
+            const verify = await Pod.findById(candidatePod._id).select('members');
+            const isNowMember = verify.members.some(
+                m => m.userId.toString() === user._id.toString()
+            );
+
+            if (!isNowMember) {
+                console.error('Pod match: member push failed to persist', {
+                    podId: candidatePod._id.toString(),
+                    userId: user._id.toString(),
+                    currentMembers: verify.members.map(m => m.userId.toString())
+                });
+                // Last-ditch attempt: use raw update to bypass Mongoose casting
+                await Pod.updateOne(
+                    { _id: candidatePod._id },
+                    { $addToSet: { members: { userId: user._id, role: 'member' } } }
+                );
+                const secondVerify = await Pod.findById(candidatePod._id).select('members');
+                const stillNotMember = !secondVerify.members.some(
+                    m => m.userId.toString() === user._id.toString()
+                );
+                if (stillNotMember) {
+                    return res.status(500).json({
+                        error: 'Could not join pod. Please try again.'
+                    });
+                }
             }
 
             user.podsJoined = (user.podsJoined || 0) + 1;
@@ -174,11 +205,16 @@ router.post('/match', authenticateUser, async (req, res) => {
                 content: `You were matched into "${candidatePod.name}"`
             });
 
-            // Return the definitive pod state
+            // Return the *definitive* pod state, freshly read
             const finalPod = await Pod.findById(candidatePod._id);
-            return res.json({ matched: true, pod: finalPod, created: false });
+            return res.json({
+                matched: true,
+                pod: finalPod,
+                created: false
+            });
         }
 
+        // ---- No candidate found — create a new pod ----
         const newPod = await Pod.create({
             name: `${language} ${normalizedLevel} pod`,
             description: 'Auto-generated pod',
@@ -193,7 +229,23 @@ router.post('/match', authenticateUser, async (req, res) => {
         user.podsJoined = (user.podsJoined || 0) + 1;
         await user.save();
 
-        res.status(201).json({ matched: true, pod: newPod, created: true });
+        // Verify the creator was stored as a member
+        const verifyNew = await Pod.findById(newPod._id).select('members');
+        const creatorIsMember = verifyNew.members.some(
+            m => m.userId.toString() === user._id.toString()
+        );
+        if (!creatorIsMember) {
+            console.error('Pod create: creator missing from members array', {
+                podId: newPod._id.toString(),
+                userId: user._id.toString()
+            });
+        }
+
+        res.status(201).json({
+            matched: true,
+            pod: verifyNew ? newPod : newPod,
+            created: true
+        });
     } catch (error) {
         console.error('Pod match error:', error);
         res.status(400).json({ error: error.message });
