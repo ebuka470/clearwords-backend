@@ -68,12 +68,11 @@ app.use(helmet({ contentSecurityPolicy: false, crossOriginEmbedderPolicy: false 
 app.use(cors({
     origin: function (origin, callback) {
         if (!origin) return callback(null, true);
-        const allowedOrigins = [
+                const allowedOrigins = [
             'https://clearwords.vercel.app',
-            'https://clearwords-updates.vercel.app',
             'https://clearwords.com.ng',
             'https://www.clearwords.com.ng',
-            'http://localhost:8080',
+            'https://clearwords-updates.vercel.app',
             'http://localhost:3000',
             'http://localhost:5173',
             'http://localhost:8081',
