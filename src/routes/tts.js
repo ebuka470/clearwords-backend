@@ -153,16 +153,28 @@ router.get('/usage', authenticateUser, async (req, res) => {
         const user = await User.findById(req.userId);
         if (!user) return res.status(404).json({ error: 'User not found' });
 
-        const dateKey = getDateKey(parseInt(req.query.timezoneOffsetMinutes));
-        const limit = TTS_LIMITS[user.subscriptionTier] ?? TTS_LIMITS.free;
-        const used = await UsageCounter.getCount(user._id, 'tts_generate', dateKey);
+        const limits = getUserLimits(user);
+        // Parse safely — undefined / NaN / non-numeric all fall back to UTC
+        const parsedTz = parseInt(req.query.timezoneOffsetMinutes);
+        const dateKey = getDateKey(Number.isFinite(parsedTz) ? parsedTz : undefined);
+
+        const chatLimit = CHAT_LIMITS[user.subscriptionTier] ?? CHAT_LIMITS.free;
+        const customLimit = limits.customLessonsPerDay;
+
+        const [chatUsed, customUsed] = await Promise.all([
+            UsageCounter.getCount(user._id, 'ai_chat_message', dateKey),
+            UsageCounter.getCount(user._id, 'ai_custom_lesson', dateKey)
+        ]);
 
         res.json({
             dateKey,
             tier: user.subscriptionTier,
-            tts: limit === Infinity
-                ? { unlimited: true, used }
-                : { used, limit, remaining: Math.max(0, limit - used) }
+            chat: chatLimit === Infinity
+                ? { unlimited: true, used: chatUsed }
+                : { used: chatUsed, limit: chatLimit, remaining: Math.max(0, chatLimit - chatUsed) },
+            customLessons: customLimit === Infinity
+                ? { unlimited: true, used: customUsed }
+                : { used: customUsed, limit: customLimit, remaining: Math.max(0, customLimit - customUsed) }
         });
     } catch (error) {
         console.error('Usage error:', error);

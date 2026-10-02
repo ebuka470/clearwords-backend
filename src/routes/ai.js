@@ -13,9 +13,11 @@ const router = express.Router();
 // ============================================
 function getDateKey(timezoneOffsetMinutes) {
     const now = new Date();
-    if (typeof timezoneOffsetMinutes === 'number') {
+    if (typeof timezoneOffsetMinutes === 'number' && Number.isFinite(timezoneOffsetMinutes)) {
         const shifted = new Date(now.getTime() + timezoneOffsetMinutes * 60 * 1000);
-        return shifted.toISOString().slice(0, 10);
+        if (!isNaN(shifted.getTime())) {
+            return shifted.toISOString().slice(0, 10);
+        }
     }
     return now.toISOString().slice(0, 10);
 }
@@ -55,31 +57,29 @@ async function mistralWithRetry(fn, maxRetries = 2) {
  */
 function mistralErrorResponse(error) {
     const status = error?.statusCode || error?.status || error?.response?.status;
+
     if (status === 429) {
+        // Mistral is rate-limiting us, not the user hitting a cap.
+        // Return 503 so the frontend shows "try again" not the paywall.
         return {
-            status: 429,
+            status: 503,
             body: {
                 status: 'error',
-                message: 'Timmy is a bit overwhelmed right now. Please try again in a moment.',
-                retryable: true
+                message: 'Timmy is catching his breath. Try again in a few seconds.',
+                retryable: true,
+                source: 'mistral'
             }
         };
     }
     if (status === 401 || status === 403) {
         return {
             status: 500,
-            body: {
-                status: 'error',
-                message: 'AI service is not configured correctly.'
-            }
+            body: { status: 'error', message: 'AI service is not configured correctly.' }
         };
     }
     return {
         status: 502,
-        body: {
-            status: 'error',
-            message: 'Timmy couldn\'t respond just now. Please try again.'
-        }
+        body: { status: 'error', message: "Timmy couldn't respond just now. Please try again." }
     };
 }
 
@@ -419,7 +419,9 @@ router.get('/usage', authenticateUser, async (req, res) => {
         if (!user) return res.status(404).json({ error: 'User not found' });
 
         const limits = getUserLimits(user);
-        const dateKey = getDateKey(parseInt(req.query.timezoneOffsetMinutes));
+        // Parse safely — undefined / NaN / non-numeric all fall back to UTC
+        const parsedTz = parseInt(req.query.timezoneOffsetMinutes);
+        const dateKey = getDateKey(Number.isFinite(parsedTz) ? parsedTz : undefined);
 
         const chatLimit = CHAT_LIMITS[user.subscriptionTier] ?? CHAT_LIMITS.free;
         const customLimit = limits.customLessonsPerDay;
