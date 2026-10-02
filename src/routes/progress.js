@@ -21,7 +21,7 @@ const router = express.Router();
    ============================================================ */
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = dirname(__filename);
-const DATA_DIR = path.join(__dirname, '../data');
+const DATA_DIR = path.join(__dirname, '../../data');
 
 const CURRICULUM = {};
 try {

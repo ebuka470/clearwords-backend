@@ -49,14 +49,61 @@ router.get('/', authenticateUser, async (req, res) => {
         const pods = await Pod.find({
             'members.userId': req.userId,
             isActive: true
-        }).sort({ updatedAt: -1 });
+        })
+        .populate('members.userId', 'fullName username avatarUrl currentLevel totalXP weeklyXP lastActive')
+        .sort({ updatedAt: -1 });
 
-        res.json({
-            data: pods,
-            items: pods,
-            pods: pods,
-            total: pods.length
-        });
+        // Compute per-member weekly XP from check-ins in the last 7 days
+        const startOfWeek = new Date();
+        startOfWeek.setDate(startOfWeek.getDate() - startOfWeek.getDay());
+        startOfWeek.setHours(0, 0, 0, 0);
+
+        const shaped = await Promise.all(pods.map(async (pod) => {
+            const obj = pod.toObject();
+
+            // Aggregate weekly check-in XP per author
+            const weeklyAgg = await PodMessage.aggregate([
+                {
+                    $match: {
+                        podId: pod._id,
+                        type: 'checkin',
+                        createdAt: { $gte: startOfWeek }
+                    }
+                },
+                {
+                    $group: {
+                        _id: '$authorId',
+                        lessons: { $sum: '$lessonsCompleted' }
+                    }
+                }
+            ]);
+
+            const weeklyMap = Object.fromEntries(
+                weeklyAgg.map(w => [w._id.toString(), w.lessons || 0])
+            );
+
+            // Enrich each member with the display fields the frontend needs
+            obj.members = obj.members.map(m => {
+                const u = m.userId || {};
+                return {
+                    userId: u._id || m.userId,
+                    role: m.role,
+                    joinedAt: m.joinedAt,
+                    // Flatten the fields the frontend reads
+                    fullName: u.fullName || '',
+                    username: u.username || '',
+                    avatarUrl: u.avatarUrl || '',
+                    currentLevel: u.currentLevel || 1,
+                    totalXP: u.totalXP || 0,
+                    weeklyXP: weeklyMap[u._id?.toString()] || 0,
+                    lastActive: u.lastActive || null
+                };
+            });
+
+            return obj;
+        }));
+
+        res.json({ data: shaped, items: shaped, total: shaped.length });
     } catch (error) {
         console.error('Get pods error:', error);
         res.status(400).json({ error: error.message });
