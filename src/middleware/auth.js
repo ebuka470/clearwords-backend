@@ -20,8 +20,7 @@ function verifyToken(req) {
 
 /**
  * Returns true if the token was issued before the user's last password
- * change. In that case the token should be treated as expired, even if
- * its `exp` claim is still in the future.
+ * change. In that case the token should be treated as expired.
  */
 function tokenPredatesPasswordChange(decoded, user) {
     if (!user.passwordChangedAt) return false;
@@ -31,9 +30,8 @@ function tokenPredatesPasswordChange(decoded, user) {
 
 /**
  * Authenticate via a ClearWords-issued JWT.
- * Rejects the request (401/403) if the token is missing, invalid,
- * belongs to a deleted user, belongs to a banned user, or was issued
- * before the user's last password change.
+ * Sets req.userId as a STRING (not an ObjectId) so downstream
+ * comparisons against `.toString()` values always work.
  */
 export async function authenticateUser(req, res, next) {
     const authHeader = req.headers.authorization;
@@ -67,7 +65,7 @@ export async function authenticateUser(req, res, next) {
         await user.save();
 
         req.user = user;
-        req.userId = user._id;
+        req.userId = user._id.toString();   // ← STRING, not ObjectId
         next();
 
     } catch (error) {
@@ -80,12 +78,8 @@ export async function authenticateUser(req, res, next) {
 }
 
 /**
- * Optional authentication.
- * Used on GET /api/users/:identifier where the route must work for
- * both anonymous visitors AND the logged-in owner.
- *   - Valid token (and not stale) → req.user + req.userId populated
- *   - No / invalid / stale token → req.user = null, req.userId = null
- * Never rejects the request.
+ * Optional authentication. Never rejects — sets req.userId only if a
+ * valid token is present.
  */
 export async function authenticateOptionalUser(req, res, next) {
     const decoded = verifyToken(req);
@@ -105,7 +99,7 @@ export async function authenticateOptionalUser(req, res, next) {
             await user.save();
 
             req.user = user;
-            req.userId = user._id;
+            req.userId = user._id.toString();   // ← STRING, not ObjectId
         } else {
             req.user = null;
             req.userId = null;

@@ -10,11 +10,14 @@ import { canJoinPod, getUserLimits } from '../middleware/tierGate.js';
 
 const router = express.Router();
 
-// ============================================
-// LEVEL NORMALIZATION
-// The frontend sends a numeric currentLevel (e.g. 3), but Pod.level
-// is an enum of tier strings. Map number → tier.
-// ============================================
+/* ============================================================
+   HELPERS
+   ============================================================ */
+
+/**
+ * Map a numeric currentLevel (e.g. 3) or a tier string to a
+ * Pod.level enum value. Pod.level is 'beginner' | 'intermediate' | 'advanced'.
+ */
 function normalizeLevel(l) {
     if (typeof l === 'string' && ['beginner', 'intermediate', 'advanced'].includes(l)) {
         return l;
@@ -27,8 +30,20 @@ function normalizeLevel(l) {
 }
 
 /**
- * GET /api/pods
+ * Add an `isMine` flag to a message document for the given viewer.
  */
+function shapeMessage(message, viewerId) {
+    const obj = message.toObject ? message.toObject() : message;
+    obj.isMine = !!(
+        (obj.authorId && obj.authorId.toString() === viewerId) ||
+        (obj.senderId && obj.senderId.toString() === viewerId)
+    );
+    return obj;
+}
+
+/* ============================================================
+   GET /api/pods
+   ============================================================ */
 router.get('/', authenticateUser, async (req, res) => {
     try {
         const pods = await Pod.find({
@@ -36,17 +51,22 @@ router.get('/', authenticateUser, async (req, res) => {
             isActive: true
         }).sort({ updatedAt: -1 });
 
-        res.json({ data: pods, items: pods, total: pods.length });
+        res.json({
+            data: pods,
+            items: pods,
+            pods: pods,
+            total: pods.length
+        });
     } catch (error) {
         console.error('Get pods error:', error);
         res.status(400).json({ error: error.message });
     }
 });
 
-/**
- * POST /api/pods
- * Create a pod (Premium / Immersive only).
- */
+/* ============================================================
+   POST /api/pods
+   Create a pod (Premium / Immersive only)
+   ============================================================ */
 router.post('/', authenticateUser, async (req, res) => {
     const { name, description, language, level, timezone } = req.body;
 
@@ -85,24 +105,16 @@ router.post('/', authenticateUser, async (req, res) => {
     }
 });
 
-/**
- * POST /api/pods/match
- */
-/**
- * POST /api/pods/match
- */
-/**
- * POST /api/pods/match
- * Auto-match the current user into a pod.
- *
- * Uses explicit read → modify → save instead of findOneAndUpdate so
- * we can verify the write actually persisted before returning.
- */
+/* ============================================================
+   POST /api/pods/match
+   Auto-match the current user into a pod.
+   Uses explicit read → modify → save + a verify step so we know
+   the membership write actually landed.
+   ============================================================ */
 router.post('/match', authenticateUser, async (req, res) => {
     let { language, level, timezone } = req.body || {};
 
     try {
-        // ---- Resolve defaults ----
         if (!language) {
             const u = await User.findById(req.userId).select('language');
             language = u?.language || 'yoruba';
@@ -120,7 +132,6 @@ router.post('/match', authenticateUser, async (req, res) => {
         const user = await User.findById(req.userId);
         if (!user) return res.status(404).json({ error: 'User not found' });
 
-        // ---- Tier gate ----
         const canJoin = await canJoinPod(user);
         if (!canJoin) {
             return res.status(403).json({
@@ -129,21 +140,15 @@ router.post('/match', authenticateUser, async (req, res) => {
             });
         }
 
-        // ---- Already in a pod for this language? ----
         const alreadyIn = await Pod.findOne({
             language,
             isActive: true,
             'members.userId': user._id
         });
         if (alreadyIn) {
-            return res.json({
-                matched: false,
-                pod: alreadyIn,
-                reason: 'already_in_pod'
-            });
+            return res.json({ matched: false, pod: alreadyIn, reason: 'already_in_pod' });
         }
 
-        // ---- Find a candidate pod with space ----
         const candidatePod = await Pod.findOne({
             language,
             level: normalizedLevel,
@@ -154,45 +159,30 @@ router.post('/match', authenticateUser, async (req, res) => {
         }).sort({ createdAt: 1 });
 
         if (candidatePod) {
-            // Guard against a race: re-check membership before pushing
             const alreadyMember = candidatePod.members.some(
                 m => m.userId.toString() === user._id.toString()
             );
 
             if (!alreadyMember) {
-                candidatePod.members.push({
-                    userId: user._id,
-                    role: 'member'
-                });
+                candidatePod.members.push({ userId: user._id, role: 'member' });
                 await candidatePod.save();
             }
 
-            // ---- VERIFY the write landed ----
+            // Verify the write actually landed
             const verify = await Pod.findById(candidatePod._id).select('members');
-            const isNowMember = verify.members.some(
+            const isMember = verify.members.some(
                 m => m.userId.toString() === user._id.toString()
             );
 
-            if (!isNowMember) {
-                console.error('Pod match: member push failed to persist', {
+            if (!isMember) {
+                console.warn('matchPod: $push did not persist, retrying with $addToSet', {
                     podId: candidatePod._id.toString(),
-                    userId: user._id.toString(),
-                    currentMembers: verify.members.map(m => m.userId.toString())
+                    userId: user._id.toString()
                 });
-                // Last-ditch attempt: use raw update to bypass Mongoose casting
                 await Pod.updateOne(
                     { _id: candidatePod._id },
                     { $addToSet: { members: { userId: user._id, role: 'member' } } }
                 );
-                const secondVerify = await Pod.findById(candidatePod._id).select('members');
-                const stillNotMember = !secondVerify.members.some(
-                    m => m.userId.toString() === user._id.toString()
-                );
-                if (stillNotMember) {
-                    return res.status(500).json({
-                        error: 'Could not join pod. Please try again.'
-                    });
-                }
             }
 
             user.podsJoined = (user.podsJoined || 0) + 1;
@@ -205,16 +195,11 @@ router.post('/match', authenticateUser, async (req, res) => {
                 content: `You were matched into "${candidatePod.name}"`
             });
 
-            // Return the *definitive* pod state, freshly read
             const finalPod = await Pod.findById(candidatePod._id);
-            return res.json({
-                matched: true,
-                pod: finalPod,
-                created: false
-            });
+            return res.json({ matched: true, pod: finalPod, created: false });
         }
 
-        // ---- No candidate found — create a new pod ----
+        // No candidate — create a new pod
         const newPod = await Pod.create({
             name: `${language} ${normalizedLevel} pod`,
             description: 'Auto-generated pod',
@@ -229,32 +214,16 @@ router.post('/match', authenticateUser, async (req, res) => {
         user.podsJoined = (user.podsJoined || 0) + 1;
         await user.save();
 
-        // Verify the creator was stored as a member
-        const verifyNew = await Pod.findById(newPod._id).select('members');
-        const creatorIsMember = verifyNew.members.some(
-            m => m.userId.toString() === user._id.toString()
-        );
-        if (!creatorIsMember) {
-            console.error('Pod create: creator missing from members array', {
-                podId: newPod._id.toString(),
-                userId: user._id.toString()
-            });
-        }
-
-        res.status(201).json({
-            matched: true,
-            pod: verifyNew ? newPod : newPod,
-            created: true
-        });
+        res.status(201).json({ matched: true, pod: newPod, created: true });
     } catch (error) {
         console.error('Pod match error:', error);
         res.status(400).json({ error: error.message });
     }
 });
 
-/**
- * POST /api/pods/join-by-code
- */
+/* ============================================================
+   POST /api/pods/join-by-code
+   ============================================================ */
 router.post('/join-by-code', authenticateUser, async (req, res) => {
     const { inviteCode } = req.body || {};
 
@@ -268,9 +237,7 @@ router.post('/join-by-code', authenticateUser, async (req, res) => {
             isActive: true
         });
 
-        if (!pod) {
-            return res.status(404).json({ error: 'No pod found with that invite code' });
-        }
+        if (!pod) return res.status(404).json({ error: 'No pod found with that invite code' });
 
         if (pod.members.length >= pod.maxMembers) {
             return res.status(400).json({ error: 'Pod is full' });
@@ -340,9 +307,9 @@ router.post('/join-by-code', authenticateUser, async (req, res) => {
     }
 });
 
-/**
- * POST /api/pods/:podId/join
- */
+/* ============================================================
+   POST /api/pods/:podId/join
+   ============================================================ */
 router.post('/:podId/join', authenticateUser, async (req, res) => {
     const { podId } = req.params;
     const { inviteCode } = req.body || {};
@@ -425,9 +392,9 @@ router.post('/:podId/join', authenticateUser, async (req, res) => {
     }
 });
 
-/**
- * DELETE /api/pods/:podId/leave
- */
+/* ============================================================
+   DELETE /api/pods/:podId/leave
+   ============================================================ */
 router.delete('/:podId/leave', authenticateUser, async (req, res) => {
     const { podId } = req.params;
 
@@ -460,9 +427,10 @@ router.delete('/:podId/leave', authenticateUser, async (req, res) => {
     }
 });
 
-/**
- * GET /api/pods/:podId/messages
- */
+/* ============================================================
+   GET /api/pods/:podId/messages
+   Returns each message shaped with an `isMine` flag.
+   ============================================================ */
 router.get('/:podId/messages', authenticateUser, async (req, res) => {
     const { podId } = req.params;
     const page = parseInt(req.query.page) || 1;
@@ -483,16 +451,25 @@ router.get('/:podId/messages', authenticateUser, async (req, res) => {
             .limit(limit);
 
         const ordered = messages.reverse();
-        res.json({ data: ordered, items: ordered, messages: ordered, page, limit });
+        const shaped = ordered.map(m => shapeMessage(m, req.userId));
+
+        res.json({
+            data: shaped,
+            items: shaped,
+            messages: shaped,
+            page,
+            limit
+        });
     } catch (error) {
         console.error('Get pod messages error:', error);
         res.status(400).json({ error: error.message });
     }
 });
 
-/**
- * POST /api/pods/:podId/messages
- */
+/* ============================================================
+   POST /api/pods/:podId/messages
+   Accepts `text` or `content`. Returns the shaped message.
+   ============================================================ */
 router.post('/:podId/messages', authenticateUser, moderationMiddleware, async (req, res) => {
     const { podId } = req.params;
     const { text, content } = req.body;
@@ -517,6 +494,7 @@ router.post('/:podId/messages', authenticateUser, moderationMiddleware, async (r
             authorId: user._id,
             authorUsername: user.username || user.email.split('@')[0],
             authorAvatar: user.avatarUrl || '',
+            authorName: user.fullName || '',
             text: messageText,
             type: 'text'
         });
@@ -524,16 +502,20 @@ router.post('/:podId/messages', authenticateUser, moderationMiddleware, async (r
         pod.updatedAt = new Date();
         await pod.save();
 
-        res.status(201).json(message);
+        const obj = message.toObject();
+        obj.isMine = true;
+        res.status(201).json(obj);
     } catch (error) {
         console.error('Send pod message error:', error);
         res.status(400).json({ error: error.message });
     }
 });
 
-/**
- * POST /api/pods/:podId/checkin
- */
+/* ============================================================
+   POST /api/pods/:podId/checkin
+   Accepts `lessonsCompleted` (number) or `note` (string).
+   Stores the count as a number on the message.
+   ============================================================ */
 router.post('/:podId/checkin', authenticateUser, async (req, res) => {
     const { podId } = req.params;
     const { lessonsCompleted, note } = req.body || {};
@@ -544,10 +526,7 @@ router.post('/:podId/checkin', authenticateUser, async (req, res) => {
         resolvedLessons = match ? parseInt(match[0], 10) : 0;
     }
     if (resolvedLessons == null) resolvedLessons = 0;
-
-    if (typeof resolvedLessons !== 'number' || resolvedLessons < 0) {
-        return res.status(400).json({ error: 'lessonsCompleted must be a non-negative number' });
-    }
+    resolvedLessons = Math.min(Math.max(0, Number(resolvedLessons) || 0), 100);
 
     try {
         const pod = await Pod.findById(podId);
@@ -580,8 +559,10 @@ router.post('/:podId/checkin', authenticateUser, async (req, res) => {
             authorId: req.userId,
             authorUsername: user.username || user.email.split('@')[0],
             authorAvatar: user.avatarUrl || '',
+            authorName: user.fullName || '',
             text: `✅ Checked in: ${resolvedLessons} lesson${resolvedLessons === 1 ? '' : 's'} this week`,
-            type: 'checkin'
+            type: 'checkin',
+            lessonsCompleted: resolvedLessons
         });
 
         const distinctCheckins = await PodMessage.distinct('authorId', {
@@ -609,9 +590,12 @@ router.post('/:podId/checkin', authenticateUser, async (req, res) => {
         pod.totalXP += resolvedLessons;
         await pod.save();
 
+        const obj = checkin.toObject();
+        obj.isMine = true;
+
         res.status(201).json({
             success: true,
-            checkin,
+            checkin: obj,
             sharedStreak: pod.sharedStreak,
             weeklyXP: pod.weeklyXP
         });
@@ -621,9 +605,10 @@ router.post('/:podId/checkin', authenticateUser, async (req, res) => {
     }
 });
 
-/**
- * GET /api/pods/:podId/leaderboard
- */
+/* ============================================================
+   GET /api/pods/:podId/leaderboard
+   Aggregates on the numeric lessonsCompleted field.
+   ============================================================ */
 router.get('/:podId/leaderboard', authenticateUser, async (req, res) => {
     const { podId } = req.params;
 
@@ -655,13 +640,15 @@ router.get('/:podId/leaderboard', authenticateUser, async (req, res) => {
             {
                 $group: {
                     _id: '$authorId',
-                    lessons: { $sum: { $toInt: { $arrayElemAt: [{ $split: ['$text', ': '] }, 1] } } },
+                    lessons: { $sum: '$lessonsCompleted' },
                     checkins: { $sum: 1 }
                 }
             }
         ]);
 
-        const xpMap = Object.fromEntries(memberXP.map(m => [m._id.toString(), m.lessons || 0]));
+        const xpMap = Object.fromEntries(
+            memberXP.map(m => [m._id.toString(), m.lessons || 0])
+        );
 
         const memberLeaderboard = pod.members.map(m => ({
             userId: m.userId._id,
@@ -687,7 +674,9 @@ router.get('/:podId/leaderboard', authenticateUser, async (req, res) => {
             { $limit: 20 }
         ]);
 
-        const podRank = podRanking.findIndex(p => p._id.toString() === pod._id.toString()) + 1;
+        const podRank = podRanking.findIndex(
+            p => p._id.toString() === pod._id.toString()
+        ) + 1;
 
         res.json({
             pod: {

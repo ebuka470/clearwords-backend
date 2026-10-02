@@ -9,6 +9,9 @@ import { canCreatePair, getUserLimits } from '../middleware/tierGate.js';
 
 const router = express.Router();
 
+/**
+ * Compute effective voice/video flags for a pair.
+ */
 function computePairFlags(userA, userB) {
     const a = getUserLimits(userA);
     const b = getUserLimits(userB);
@@ -18,17 +21,51 @@ function computePairFlags(userA, userB) {
     };
 }
 
+/**
+ * Extract a string ID from a populated or unpopulated user field.
+ * Works whether the field is an ObjectId, a plain hex string, or a
+ * populated Mongoose document with an `_id`.
+ */
+function extractId(u) {
+    if (!u) return null;
+    if (typeof u === 'string') return u;
+    if (u._id) return String(u._id);
+    return String(u);
+}
+
+/**
+ * Shape a Pair document for the frontend.
+ * Adds `partner` (the other user) and `partnerId` so the frontend can
+ * render the peer directly without knowing which side they're on.
+ */
 function shapePair(pair, viewerId) {
     const obj = pair.toObject ? pair.toObject() : pair;
-    const iAmA = obj.userA && obj.userA._id
-        ? obj.userA._id.toString() === viewerId
-        : obj.userA.toString() === viewerId;
-    obj.partner = iAmA ? obj.userB : obj.userA;
+    const viewer = String(viewerId);
+
+    const idA = extractId(obj.userA);
+    const idB = extractId(obj.userB);
+
+    // Determine which side of the pair the viewer is on
+    if (idA === viewer) {
+        obj.partner = obj.userB;
+        obj.myRole = 'A';
+    } else if (idB === viewer) {
+        obj.partner = obj.userA;
+        obj.myRole = 'B';
+    } else {
+        // Shouldn't happen for pairs returned from the DB for this user,
+        // but degrade gracefully instead of crashing.
+        obj.partner = obj.userA;
+        obj.myRole = null;
+    }
+
+    obj.partnerId = extractId(obj.partner);
     return obj;
 }
 
 /**
  * GET /api/pairs
+ * Returns { data, items, pairs, total } — any list-shape works.
  */
 router.get('/', authenticateUser, async (req, res) => {
     try {
@@ -62,7 +99,9 @@ router.post('/request', authenticateUser, async (req, res) => {
 
     let resolvedTargetId = targetUserId || userId;
     if (!resolvedTargetId) {
-        return res.status(400).json({ error: 'targetUserId (or userId) is required' });
+        return res.status(400).json({
+            error: 'targetUserId (or userId) is required'
+        });
     }
 
     try {
@@ -73,7 +112,7 @@ router.post('/request', authenticateUser, async (req, res) => {
             if (!byUsername) {
                 return res.status(404).json({ error: 'No learner found with that username' });
             }
-            resolvedTargetId = byUsername._id;
+            resolvedTargetId = byUsername._id.toString();
         }
 
         if (String(resolvedTargetId) === String(req.userId)) {
@@ -154,7 +193,6 @@ router.post('/request', authenticateUser, async (req, res) => {
 
 /**
  * POST /api/pairs/match
- * Now matches on either direction of overlap, not both.
  */
 router.post('/match', authenticateUser, async (req, res) => {
     const { languageLearning, languageTeaching, timezoneOffsetMinutes } = req.body || {};
@@ -205,11 +243,6 @@ router.post('/match', authenticateUser, async (req, res) => {
         });
         alreadyPairedWith.add(me._id.toString());
 
-        // ---- Candidate search ----
-        // A candidate qualifies if ANY of:
-        //   1. They teach something I'm learning AND learn something I teach
-        //   2. They teach something I'm learning (I can be their student)
-        //   3. They learn something I teach (they can be my student)
         const candidates = await User.find({
             _id: { $nin: Array.from(alreadyPairedWith) },
             isBanned: false,
@@ -219,12 +252,8 @@ router.post('/match', authenticateUser, async (req, res) => {
                     teachingLanguages: { $in: myLearning },
                     learningLanguages: { $in: myTeaching }
                 },
-                {
-                    teachingLanguages: { $in: myLearning }
-                },
-                {
-                    learningLanguages: { $in: myTeaching }
-                }
+                { teachingLanguages: { $in: myLearning } },
+                { learningLanguages: { $in: myTeaching } }
             ]
         })
             .limit(40)
@@ -253,7 +282,6 @@ router.post('/match', authenticateUser, async (req, res) => {
             const sharedLearning = (c.teachingLanguages || []).filter(l => myLearning.includes(l));
             const sharedTeaching = (c.learningLanguages || []).filter(l => myTeaching.includes(l));
 
-            // Reward both directions of overlap more heavily
             if (sharedLearning.length && sharedTeaching.length) score += 30;
             score += (sharedLearning.length + sharedTeaching.length) * 8;
 
@@ -351,9 +379,9 @@ router.post('/:pairId/accept', authenticateUser, async (req, res) => {
         if (!pair) return res.status(404).json({ error: 'Pair not found' });
 
         if (
-    pair.userB.toString() !== req.userId.toString() &&
-    pair.userA.toString() !== req.userId.toString()
-) {
+            pair.userA.toString() !== req.userId &&
+            pair.userB.toString() !== req.userId
+        ) {
             return res.status(403).json({ error: 'Not part of this pair' });
         }
 
@@ -395,9 +423,9 @@ router.delete('/:pairId', authenticateUser, async (req, res) => {
         if (!pair) return res.status(404).json({ error: 'Pair not found' });
 
         if (
-    pair.userA.toString() !== req.userId.toString() &&
-    pair.userB.toString() !== req.userId.toString()
-) {
+            pair.userA.toString() !== req.userId &&
+            pair.userB.toString() !== req.userId
+        ) {
             return res.status(403).json({ error: 'Not part of this pair' });
         }
 
@@ -438,9 +466,9 @@ router.get('/:pairId/messages', authenticateUser, async (req, res) => {
         if (!pair) return res.status(404).json({ error: 'Pair not found' });
 
         if (
-    pair.userA.toString() !== req.userId.toString() &&
-    pair.userB.toString() !== req.userId.toString()
-) {
+            pair.userA.toString() !== req.userId &&
+            pair.userB.toString() !== req.userId
+        ) {
             return res.status(403).json({ error: 'Not part of this pair' });
         }
 
@@ -454,7 +482,22 @@ router.get('/:pairId/messages', authenticateUser, async (req, res) => {
         await pair.save();
 
         const ordered = messages.reverse();
-        res.json({ data: ordered, items: ordered, messages: ordered, page, limit });
+
+        // Shape each message so the frontend can style "mine vs theirs"
+        // without comparing IDs on its own.
+        const shapedMessages = ordered.map(m => {
+            const obj = m.toObject ? m.toObject() : m;
+            obj.isMine = obj.senderId && obj.senderId.toString() === req.userId;
+            return obj;
+        });
+
+        res.json({
+            data: shapedMessages,
+            items: shapedMessages,
+            messages: shapedMessages,
+            page,
+            limit
+        });
     } catch (error) {
         console.error('Get pair messages error:', error);
         res.status(400).json({ error: error.message });
@@ -482,9 +525,9 @@ router.post('/:pairId/messages', authenticateUser, moderationMiddleware, async (
         }
 
         if (
-    pair.userA.toString() !== req.userId.toString() &&
-    pair.userB.toString() !== req.userId.toString()
-) {
+            pair.userA.toString() !== req.userId &&
+            pair.userB.toString() !== req.userId
+        ) {
             return res.status(403).json({ error: 'Not part of this pair' });
         }
 
@@ -497,7 +540,11 @@ router.post('/:pairId/messages', authenticateUser, moderationMiddleware, async (
         pair.lastActivityAt = new Date();
         await pair.save();
 
-        res.status(201).json(message);
+        // Return the shaped message (with isMine) for immediate rendering
+        const obj = message.toObject();
+        obj.isMine = true;
+
+        res.status(201).json(obj);
     } catch (error) {
         console.error('Send pair message error:', error);
         res.status(400).json({ error: error.message });
@@ -524,9 +571,9 @@ router.post('/:pairId/call/start', authenticateUser, async (req, res) => {
         }
 
         if (
-    pair.userA.toString() !== req.userId.toString() &&
-    pair.userB.toString() !== req.userId.toString()
-) {
+            pair.userA.toString() !== req.userId &&
+            pair.userB.toString() !== req.userId
+        ) {
             return res.status(403).json({ error: 'Not part of this pair' });
         }
 
@@ -551,7 +598,7 @@ router.post('/:pairId/call/start', authenticateUser, async (req, res) => {
             });
         }
 
-        const partnerId = pair.userA.toString() === req.userId.toString() ? pair.userB : pair.userA;
+        const partnerId = pair.userA.toString() === req.userId ? pair.userB : pair.userA;
         const partner = await User.findById(partnerId);
         if (!partner) return res.status(404).json({ error: 'Partner not found' });
 
