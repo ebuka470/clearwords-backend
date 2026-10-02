@@ -5,27 +5,21 @@ import User from '../models/User.js';
 import Notification from '../models/Notification.js';
 import { authenticateUser } from '../middleware/auth.js';
 import { moderationMiddleware } from '../middleware/moderation.js';
-import { canCreatePair, getUserLimits } from '../middleware/tierGate.js';
+import {
+    canCreatePair,
+    getUserLimits,
+    countVoicePairs,
+    countVideoPairs,
+    canAddVoicePair,
+    canAddVideoPair
+} from '../middleware/tierGate.js';
 
 const router = express.Router();
 
-/**
- * Compute effective voice/video flags for a pair.
- */
-function computePairFlags(userA, userB) {
-    const a = getUserLimits(userA);
-    const b = getUserLimits(userB);
-    return {
-        voiceEnabled: !!(a.voice && b.voice),
-        videoEnabled: !!(a.video && b.video)
-    };
-}
+/* ============================================================
+   HELPERS
+   ============================================================ */
 
-/**
- * Extract a string ID from a populated or unpopulated user field.
- * Works whether the field is an ObjectId, a plain hex string, or a
- * populated Mongoose document with an `_id`.
- */
 function extractId(u) {
     if (!u) return null;
     if (typeof u === 'string') return u;
@@ -35,8 +29,6 @@ function extractId(u) {
 
 /**
  * Shape a Pair document for the frontend.
- * Adds `partner` (the other user) and `partnerId` so the frontend can
- * render the peer directly without knowing which side they're on.
  */
 function shapePair(pair, viewerId) {
     const obj = pair.toObject ? pair.toObject() : pair;
@@ -45,7 +37,6 @@ function shapePair(pair, viewerId) {
     const idA = extractId(obj.userA);
     const idB = extractId(obj.userB);
 
-    // Determine which side of the pair the viewer is on
     if (idA === viewer) {
         obj.partner = obj.userB;
         obj.myRole = 'A';
@@ -53,8 +44,6 @@ function shapePair(pair, viewerId) {
         obj.partner = obj.userA;
         obj.myRole = 'B';
     } else {
-        // Shouldn't happen for pairs returned from the DB for this user,
-        // but degrade gracefully instead of crashing.
         obj.partner = obj.userA;
         obj.myRole = null;
     }
@@ -64,9 +53,48 @@ function shapePair(pair, viewerId) {
 }
 
 /**
- * GET /api/pairs
- * Returns { data, items, pairs, total } — any list-shape works.
+ * Compute effective voice/video flags for a pair.
+ *
+ * Both users must have the tier entitlement AND the requesting user
+ * must have an available slot in their voice/video partner cap.
+ *
+ * Free: no voice, no video.
+ * Premium: voice on up to 5 pairs.
+ * Immersive: voice + video on unlimited pairs.
  */
+async function computePairFlags(userA, userB, enableVoice = true, enableVideo = true) {
+    const a = getUserLimits(userA);
+    const b = getUserLimits(userB);
+
+    let voiceEnabled = false;
+    let videoEnabled = false;
+
+    // ---- Voice ----
+    if (enableVoice && a.voice && b.voice) {
+        if (a.voicePairs === Infinity) {
+            voiceEnabled = true;
+        } else {
+            const used = await countVoicePairs(userA);
+            voiceEnabled = used < a.voicePairs;
+        }
+    }
+
+    // ---- Video ----
+    if (enableVideo && a.video && b.video) {
+        if (a.videoPairs === Infinity) {
+            videoEnabled = true;
+        } else {
+            const used = await countVideoPairs(userA);
+            videoEnabled = used < a.videoPairs;
+        }
+    }
+
+    return { voiceEnabled, videoEnabled };
+}
+
+/* ============================================================
+   GET /api/pairs
+   ============================================================ */
 router.get('/', authenticateUser, async (req, res) => {
     try {
         const pairs = await Pair.find({
@@ -91,9 +119,10 @@ router.get('/', authenticateUser, async (req, res) => {
     }
 });
 
-/**
- * POST /api/pairs/request
- */
+/* ============================================================
+   POST /api/pairs/request
+   Unlimited text pairs. Voice/video gated by tier + slots.
+   ============================================================ */
 router.post('/request', authenticateUser, async (req, res) => {
     const { targetUserId, userId, languageA, languageB, message } = req.body;
 
@@ -112,7 +141,7 @@ router.post('/request', authenticateUser, async (req, res) => {
             if (!byUsername) {
                 return res.status(404).json({ error: 'No learner found with that username' });
             }
-            resolvedTargetId = byUsername._id.toString();
+            resolvedTargetId = byUsername._id;
         }
 
         if (String(resolvedTargetId) === String(req.userId)) {
@@ -124,14 +153,7 @@ router.post('/request', authenticateUser, async (req, res) => {
         if (!target) return res.status(404).json({ error: 'Target user not found' });
         if (target.isBanned) return res.status(403).json({ error: 'Target user is unavailable' });
 
-        const canPair = await canCreatePair(user);
-        if (!canPair) {
-            return res.status(403).json({
-                error: 'Pair limit reached for your tier',
-                currentTier: user.subscriptionTier
-            });
-        }
-
+        // Prevent duplicate pairs (still useful — one pair per pair)
         const existing = await Pair.findOne({
             status: { $in: ['pending', 'active'] },
             $or: [
@@ -163,7 +185,7 @@ router.post('/request', authenticateUser, async (req, res) => {
                 || 'english';
         }
 
-        const flags = computePairFlags(user, target);
+        const flags = await computePairFlags(user, target, true, true);
 
         const pair = await Pair.create({
             userA: req.userId,
@@ -191,9 +213,10 @@ router.post('/request', authenticateUser, async (req, res) => {
     }
 });
 
-/**
- * POST /api/pairs/match
- */
+/* ============================================================
+   POST /api/pairs/match
+   Auto-match. Unlimited text pairs.
+   ============================================================ */
 router.post('/match', authenticateUser, async (req, res) => {
     const { languageLearning, languageTeaching, timezoneOffsetMinutes } = req.body || {};
 
@@ -220,14 +243,6 @@ router.post('/match', authenticateUser, async (req, res) => {
         if (myLearning.length === 0 || myTeaching.length === 0) {
             return res.status(400).json({
                 error: 'Set learningLanguages and teachingLanguages on your profile first'
-            });
-        }
-
-        const canPair = await canCreatePair(me);
-        if (!canPair) {
-            return res.status(403).json({
-                error: 'Pair limit reached for your tier',
-                currentTier: me.subscriptionTier
             });
         }
 
@@ -262,7 +277,7 @@ router.post('/match', authenticateUser, async (req, res) => {
         if (candidates.length === 0) {
             return res.status(404).json({
                 error: 'No matching partners found right now. Try again later.',
-                hint: 'Add more learning and teaching languages to your profile to widen your matches.'
+                hint: 'Add more learning and teaching languages to widen your matches.'
             });
         }
 
@@ -313,7 +328,7 @@ router.post('/match', authenticateUser, async (req, res) => {
         const languageA = best.sharedLearning[0] || myLearning[0];
         const languageB = best.sharedTeaching[0] || myTeaching[0];
 
-        const flags = computePairFlags(me, target);
+        const flags = await computePairFlags(me, target, true, true);
 
         const pair = await Pair.create({
             userA: me._id,
@@ -368,9 +383,9 @@ router.post('/match', authenticateUser, async (req, res) => {
     }
 });
 
-/**
- * POST /api/pairs/:pairId/accept
- */
+/* ============================================================
+   POST /api/pairs/:pairId/accept
+   ============================================================ */
 router.post('/:pairId/accept', authenticateUser, async (req, res) => {
     const { pairId } = req.params;
 
@@ -378,10 +393,7 @@ router.post('/:pairId/accept', authenticateUser, async (req, res) => {
         const pair = await Pair.findById(pairId);
         if (!pair) return res.status(404).json({ error: 'Pair not found' });
 
-        if (
-            pair.userA.toString() !== req.userId &&
-            pair.userB.toString() !== req.userId
-        ) {
+        if (pair.userB.toString() !== req.userId && pair.userA.toString() !== req.userId) {
             return res.status(403).json({ error: 'Not part of this pair' });
         }
 
@@ -392,7 +404,7 @@ router.post('/:pairId/accept', authenticateUser, async (req, res) => {
         const userA = await User.findById(pair.userA);
         const userB = await User.findById(pair.userB);
         if (userA && userB) {
-            const flags = computePairFlags(userA, userB);
+            const flags = await computePairFlags(userA, userB, true, true);
             pair.voiceEnabled = flags.voiceEnabled;
             pair.videoEnabled = flags.videoEnabled;
         }
@@ -411,9 +423,9 @@ router.post('/:pairId/accept', authenticateUser, async (req, res) => {
     }
 });
 
-/**
- * DELETE /api/pairs/:pairId
- */
+/* ============================================================
+   DELETE /api/pairs/:pairId
+   ============================================================ */
 router.delete('/:pairId', authenticateUser, async (req, res) => {
     const { pairId } = req.params;
     const { reason } = req.body || {};
@@ -422,10 +434,7 @@ router.delete('/:pairId', authenticateUser, async (req, res) => {
         const pair = await Pair.findById(pairId);
         if (!pair) return res.status(404).json({ error: 'Pair not found' });
 
-        if (
-            pair.userA.toString() !== req.userId &&
-            pair.userB.toString() !== req.userId
-        ) {
+        if (pair.userA.toString() !== req.userId && pair.userB.toString() !== req.userId) {
             return res.status(403).json({ error: 'Not part of this pair' });
         }
 
@@ -453,9 +462,9 @@ router.delete('/:pairId', authenticateUser, async (req, res) => {
     }
 });
 
-/**
- * GET /api/pairs/:pairId/messages
- */
+/* ============================================================
+   GET /api/pairs/:pairId/messages
+   ============================================================ */
 router.get('/:pairId/messages', authenticateUser, async (req, res) => {
     const { pairId } = req.params;
     const page = parseInt(req.query.page) || 1;
@@ -465,10 +474,7 @@ router.get('/:pairId/messages', authenticateUser, async (req, res) => {
         const pair = await Pair.findById(pairId);
         if (!pair) return res.status(404).json({ error: 'Pair not found' });
 
-        if (
-            pair.userA.toString() !== req.userId &&
-            pair.userB.toString() !== req.userId
-        ) {
+        if (pair.userA.toString() !== req.userId && pair.userB.toString() !== req.userId) {
             return res.status(403).json({ error: 'Not part of this pair' });
         }
 
@@ -483,8 +489,6 @@ router.get('/:pairId/messages', authenticateUser, async (req, res) => {
 
         const ordered = messages.reverse();
 
-        // Shape each message so the frontend can style "mine vs theirs"
-        // without comparing IDs on its own.
         const shapedMessages = ordered.map(m => {
             const obj = m.toObject ? m.toObject() : m;
             obj.isMine = obj.senderId && obj.senderId.toString() === req.userId;
@@ -504,9 +508,9 @@ router.get('/:pairId/messages', authenticateUser, async (req, res) => {
     }
 });
 
-/**
- * POST /api/pairs/:pairId/messages
- */
+/* ============================================================
+   POST /api/pairs/:pairId/messages
+   ============================================================ */
 router.post('/:pairId/messages', authenticateUser, moderationMiddleware, async (req, res) => {
     const { pairId } = req.params;
     const { text, content } = req.body;
@@ -524,10 +528,7 @@ router.post('/:pairId/messages', authenticateUser, moderationMiddleware, async (
             return res.status(400).json({ error: 'Pair is not active' });
         }
 
-        if (
-            pair.userA.toString() !== req.userId &&
-            pair.userB.toString() !== req.userId
-        ) {
+        if (pair.userA.toString() !== req.userId && pair.userB.toString() !== req.userId) {
             return res.status(403).json({ error: 'Not part of this pair' });
         }
 
@@ -540,7 +541,6 @@ router.post('/:pairId/messages', authenticateUser, moderationMiddleware, async (
         pair.lastActivityAt = new Date();
         await pair.save();
 
-        // Return the shaped message (with isMine) for immediate rendering
         const obj = message.toObject();
         obj.isMine = true;
 
@@ -551,9 +551,13 @@ router.post('/:pairId/messages', authenticateUser, moderationMiddleware, async (
     }
 });
 
-/**
- * POST /api/pairs/:pairId/call/start
- */
+/* ============================================================
+   POST /api/pairs/:pairId/call/start
+   Session gate for voice/video calls.
+   Checks:
+     1. Both users' tier entitlement (voice: Premium+, video: Immersive)
+     2. The caller's voice/video slot cap
+   ============================================================ */
 router.post('/:pairId/call/start', authenticateUser, async (req, res) => {
     const { pairId } = req.params;
     const { type } = req.body;
@@ -570,50 +574,78 @@ router.post('/:pairId/call/start', authenticateUser, async (req, res) => {
             return res.status(400).json({ error: 'Pair is not active' });
         }
 
-        if (
-            pair.userA.toString() !== req.userId &&
-            pair.userB.toString() !== req.userId
-        ) {
+        if (pair.userA.toString() !== req.userId && pair.userB.toString() !== req.userId) {
             return res.status(403).json({ error: 'Not part of this pair' });
         }
 
         const user = await User.findById(req.userId);
         if (!user) return res.status(404).json({ error: 'User not found' });
 
-        const limits = getUserLimits(user);
-
-        if (type === 'voice' && !limits.voice) {
-            return res.status(403).json({
-                error: 'Voice calls require Premium or Immersive',
-                currentTier: user.subscriptionTier,
-                upgradeUrl: '/subscription'
-            });
-        }
-
-        if (type === 'video' && !limits.video) {
-            return res.status(403).json({
-                error: 'Video calls require Immersive',
-                currentTier: user.subscriptionTier,
-                upgradeUrl: '/subscription'
-            });
-        }
-
         const partnerId = pair.userA.toString() === req.userId ? pair.userB : pair.userA;
         const partner = await User.findById(partnerId);
         if (!partner) return res.status(404).json({ error: 'Partner not found' });
 
+        const userLimits = getUserLimits(user);
         const partnerLimits = getUserLimits(partner);
 
-        if (type === 'voice' && !partnerLimits.voice) {
-            return res.status(403).json({
-                error: 'Your partner does not have voice calls enabled on their tier'
-            });
+        // ---------------- VOICE ----------------
+        if (type === 'voice') {
+            if (!userLimits.voice) {
+                return res.status(403).json({
+                    error: 'Voice calls require Premium or Immersive',
+                    currentTier: user.subscriptionTier,
+                    upgradeUrl: '/subscription',
+                    feature: 'voice_call'
+                });
+            }
+            if (!partnerLimits.voice) {
+                return res.status(403).json({
+                    error: 'Your partner does not have voice calls enabled on their tier'
+                });
+            }
+            if (userLimits.voicePairs !== Infinity) {
+                const used = await countVoicePairs(user);
+                if (used >= userLimits.voicePairs && !pair.voiceEnabled) {
+                    return res.status(403).json({
+                        error: `You're already using voice calls with ${userLimits.voicePairs} partners. End one to start a new voice call.`,
+                        currentTier: user.subscriptionTier,
+                        voicePairsUsed: used,
+                        voicePairsLimit: userLimits.voicePairs,
+                        upgradeUrl: '/subscription',
+                        feature: 'voice_pairs'
+                    });
+                }
+            }
         }
 
-        if (type === 'video' && !partnerLimits.video) {
-            return res.status(403).json({
-                error: 'Your partner does not have video calls enabled on their tier'
-            });
+        // ---------------- VIDEO ----------------
+        if (type === 'video') {
+            if (!userLimits.video) {
+                return res.status(403).json({
+                    error: 'Video calls require Immersive',
+                    currentTier: user.subscriptionTier,
+                    upgradeUrl: '/subscription',
+                    feature: 'video_call'
+                });
+            }
+            if (!partnerLimits.video) {
+                return res.status(403).json({
+                    error: 'Your partner does not have video calls enabled on their tier'
+                });
+            }
+            if (userLimits.videoPairs !== Infinity) {
+                const used = await countVideoPairs(user);
+                if (used >= userLimits.videoPairs && !pair.videoEnabled) {
+                    return res.status(403).json({
+                        error: `You're already using video calls with ${userLimits.videoPairs} partners.`,
+                        currentTier: user.subscriptionTier,
+                        videoPairsUsed: used,
+                        videoPairsLimit: userLimits.videoPairs,
+                        upgradeUrl: '/subscription',
+                        feature: 'video_pairs'
+                    });
+                }
+            }
         }
 
         res.json({
