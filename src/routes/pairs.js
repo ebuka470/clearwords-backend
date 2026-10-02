@@ -5,16 +5,32 @@ import User from '../models/User.js';
 import Notification from '../models/Notification.js';
 import { authenticateUser } from '../middleware/auth.js';
 import { moderationMiddleware } from '../middleware/moderation.js';
-import {
-    canCreatePair,
-    getUserLimits,
-    countVoicePairs,
-    countVideoPairs,
-    canAddVoicePair,
-    canAddVideoPair
-} from '../middleware/tierGate.js';
+import { canCreatePair, getUserLimits } from '../middleware/tierGate.js';
 
 const router = express.Router();
+
+/* ============================================================
+   VOICE / VIDEO SLOT COUNTING
+   Lives here (not in tierGate.js) so that the tier middleware has
+   no runtime dependency on Pair — eliminates any chance of a
+   circular import between Pair.js and tierGate.js.
+   ============================================================ */
+
+async function countVoicePairs(user) {
+    return Pair.countDocuments({
+        $or: [{ userA: user._id }, { userB: user._id }],
+        status: 'active',
+        voiceEnabled: true
+    });
+}
+
+async function countVideoPairs(user) {
+    return Pair.countDocuments({
+        $or: [{ userA: user._id }, { userB: user._id }],
+        status: 'active',
+        videoEnabled: true
+    });
+}
 
 /* ============================================================
    HELPERS
@@ -153,7 +169,6 @@ router.post('/request', authenticateUser, async (req, res) => {
         if (!target) return res.status(404).json({ error: 'Target user not found' });
         if (target.isBanned) return res.status(403).json({ error: 'Target user is unavailable' });
 
-        // Prevent duplicate pairs (still useful — one pair per pair)
         const existing = await Pair.findOne({
             status: { $in: ['pending', 'active'] },
             $or: [
