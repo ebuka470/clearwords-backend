@@ -3,15 +3,6 @@ import Pod from '../models/Pod.js';
 
 /* ============================================================
    TIER LIMITS
-   Text pairing is unlimited on every tier. Voice and video are
-   the gate — those have real infrastructure cost and clear
-   upgrade value.
-
-   Per-tier voice/video semantics:
-     voice: false           → cannot start voice calls at all
-     voicePairs: 0          → irrelevant when voice is false
-     voicePairs: 5          → can have voice enabled on up to 5 pairs
-     voicePairs: Infinity   → no cap on voice-enabled pairs
    ============================================================ */
 export const TIER_LIMITS = {
     free: {
@@ -50,6 +41,24 @@ export const TIER_LIMITS = {
 };
 
 /* ============================================================
+   AI CHAT LIMITS (used by routes/ai.js + routes/subscription.js)
+   ============================================================ */
+export const CHAT_LIMITS = {
+    free: 200,
+    premium: Infinity,
+    immersive: Infinity
+};
+
+/* ============================================================
+   TTS AUDIO LIMITS (used by routes/tts.js + routes/subscription.js)
+   ============================================================ */
+export const TTS_LIMITS = {
+    free: 30,
+    premium: 300,
+    immersive: Infinity
+};
+
+/* ============================================================
    BASIC RESOLVERS
    ============================================================ */
 export function getUserLimits(user) {
@@ -62,26 +71,13 @@ export function getUserLimits(user) {
 /* ============================================================
    TEXT PAIRS — unlimited on every tier
    ============================================================ */
-
-/**
- * Text pairs are unlimited. Always returns true unless a lower-level
- * guard triggers elsewhere. Kept as a function so callers don't
- * change if we later add a safety cap.
- */
 export async function canCreatePair(_user) {
     return true;
 }
 
-/**
- * Voice/video slot counting lives in `routes/pairs.js`, not here.
- * This module has no dependency on Pair's runtime — that keeps
- * `Pair.js → tierGate.js → Pair.js` cycles from forming.
- */
-
 /* ============================================================
    PODS
    ============================================================ */
-
 export async function canJoinPod(user) {
     const limits = getUserLimits(user);
     const joinedCount = await Pod.countDocuments({
@@ -94,7 +90,6 @@ export async function canJoinPod(user) {
 /* ============================================================
    GENERIC FEATURE GATE
    ============================================================ */
-
 export function requireFeature(feature) {
     return async (req, res, next) => {
         const user = await User.findById(req.userId);
