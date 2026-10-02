@@ -14,9 +14,11 @@ import { autoApplyFreezeIfNeeded, grantWeeklyFreezeIfEligible } from './streak.j
 
 const router = express.Router();
 
-// ============================================
-// CURRICULUM CACHE (for XP + level completion)
-// ============================================
+/* ============================================================
+   CURRICULUM CACHE
+   Loads every data/*.json at server start so lesson lookups
+   never touch disk during a request.
+   ============================================================ */
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = dirname(__filename);
 const DATA_DIR = path.join(__dirname, '../data');
@@ -32,25 +34,33 @@ try {
                     CURRICULUM[lang] = JSON.parse(
                         fs.readFileSync(path.join(DATA_DIR, file), 'utf8')
                     );
+                    console.log(`📚 Curriculum loaded: ${lang} (${(CURRICULUM[lang].levels || []).length} levels)`);
                 } catch (err) {
                     console.warn(`Failed to parse ${file}:`, err.message);
                 }
             }
         });
+    } else {
+        console.warn(`⚠️  Curriculum directory not found: ${DATA_DIR}`);
     }
 } catch (err) {
     console.warn('Curriculum load warning:', err.message);
 }
 
+/* ============================================================
+   HELPERS
+   ============================================================ */
+
 /**
- * Look up a lesson in the curriculum.
- * Returns { lesson, level, totalLessonsInLevel } or null.
- */
-/**
- * Look up a lesson in the curriculum.
- * Supports both formats:
- *   Format A: level.lessons[] is an array of nested lessons
- *   Format B: the level itself is the lesson (data/yoruba.json shape)
+ * Look up a lesson in the curriculum. Handles two shapes:
+ *
+ *   Format A — levels have a nested `lessons: [...]` array
+ *              { level: 1, lessons: [{ id: '1-1', vocabulary: [...] }] }
+ *
+ *   Format B — the level IS the lesson
+ *              { level: 1, vocabulary: [...], dialogue: [...] }
+ *
+ * Returns { lesson, level, totalLessonsInLevel, levelLessonIds } or null.
  */
 function findLesson(language, levelId, lessonId) {
     const lang = CURRICULUM[language];
@@ -59,12 +69,13 @@ function findLesson(language, levelId, lessonId) {
     const levels = lang.levels || lang.curriculum?.levels || [];
     if (!levels.length) return null;
 
-    // Match by `level` (your data files) or `id` (fallback)
+    // ---- Locate the level ----
+    // Your data files use `level` as the key. Fall back to `id`.
     let level = levels.find(l => Number(l.level) === Number(levelId));
     if (!level) level = levels.find(l => Number(l.id) === Number(levelId));
     if (!level) return null;
 
-    // Custom lessons — never in the curriculum, always valid
+    // ---- Custom lessons: never in the curriculum, always valid ----
     if (String(lessonId).startsWith('custom-')) {
         return {
             lesson: { id: lessonId, xpReward: 15 },
@@ -74,7 +85,7 @@ function findLesson(language, levelId, lessonId) {
         };
     }
 
-    // Format A — nested lessons
+    // ---- Format A — nested lessons ----
     if (Array.isArray(level.lessons) && level.lessons.length) {
         const lesson = level.lessons.find(l =>
             String(l.id) === String(lessonId) ||
@@ -89,19 +100,20 @@ function findLesson(language, levelId, lessonId) {
         };
     }
 
-    // Format B — the level IS the lesson. Accept any of these ID shapes:
-    //   "1", "level-1", "level-1-anything", the level's own id, or its title
+    // ---- Format B — the level IS the lesson ----
+    // Accept several plausible ID shapes for the same level:
+    //   "1", "level-1", "level-1-anything", the level's own id, its title
     const acceptedIds = [
         String(levelId),
         `level-${levelId}`,
         level.id ? String(level.id) : null,
-        level.title ? String(level.title) : null
+        level.title ? String(level.title) : null,
+        level.topic ? String(level.topic) : null
     ].filter(Boolean);
 
     const matches =
         acceptedIds.includes(String(lessonId)) ||
-        String(lessonId).startsWith(`level-${levelId}`) ||
-        String(lessonId) === String(level.topic || '');
+        String(lessonId).startsWith(`level-${levelId}`);
 
     if (!matches) return null;
 
@@ -112,12 +124,14 @@ function findLesson(language, levelId, lessonId) {
         levelLessonIds: [String(lessonId)]
     };
 }
+
 /**
- * Compute XP server-side. Never trust the client.
- *   Base: 10 XP per lesson
+ * Server-computed XP. Never trusts the client.
+ *   Base: lesson.xpReward (or 10 if absent)
  *   Perfect bonus: +50%
  *   Speed bonus: +20% if completed under 60s
- *   Mistake penalty: -2 XP per mistake (min 5 XP)
+ *   Mistake penalty: −2 XP per mistake (min 5 XP)
+ *   Cap: 200 XP
  */
 function computeXP({ perfect, timeSpentSeconds, mistakesCount, lesson }) {
     let xp = lesson?.xpReward || 10;
@@ -126,14 +140,28 @@ function computeXP({ perfect, timeSpentSeconds, mistakesCount, lesson }) {
     if (timeSpentSeconds > 0 && timeSpentSeconds < 60) xp = Math.round(xp * 1.2);
 
     xp = Math.max(5, xp - (mistakesCount * 2));
-    xp = Math.min(xp, 200); // hard cap
+    xp = Math.min(xp, 200);
 
     return xp;
 }
 
 /**
- * GET /api/progress
+ * Date key in the user's timezone, e.g. '2026-10-02'.
  */
+function getDateKey(timezoneOffsetMinutes, shiftMs = 0) {
+    const now = new Date(Date.now() + shiftMs);
+    if (typeof timezoneOffsetMinutes === 'number') {
+        const shifted = new Date(now.getTime() + timezoneOffsetMinutes * 60 * 1000);
+        return shifted.toISOString().slice(0, 10);
+    }
+    return now.toISOString().slice(0, 10);
+}
+
+/* ============================================================
+   GET /api/progress
+   Fetch the user's progress for one language (creates an empty
+   record on first access).
+   ============================================================ */
 router.get('/', authenticateUser, async (req, res) => {
     const { language } = req.query;
 
@@ -162,10 +190,12 @@ router.get('/', authenticateUser, async (req, res) => {
     }
 });
 
-/**
- * POST /api/progress/complete-lesson
- * Server computes XP. Client only reports performance metrics.
- */
+/* ============================================================
+   POST /api/progress/complete-lesson
+   The core learning endpoint. Accepts either `levelId` or
+   `levelNumber`; tolerates missing `language` by defaulting
+   to the user's primary language.
+   ============================================================ */
 router.post('/complete-lesson', authenticateUser, async (req, res) => {
     const {
         language: bodyLanguage,
@@ -179,14 +209,14 @@ router.post('/complete-lesson', authenticateUser, async (req, res) => {
         timezoneOffsetMinutes
     } = req.body;
 
-    // Auto-fill language from user if frontend didn't send it
+    // Resolve language
     let language = bodyLanguage;
     if (!language) {
         const u = await User.findById(req.userId).select('language');
         language = u?.language || 'yoruba';
     }
 
-    // Accept levelNumber as alias for levelId
+    // Resolve level from either alias
     const resolvedLevel = levelId != null ? levelId : levelNumber;
 
     if (!language || resolvedLevel == null || !lessonId) {
@@ -204,60 +234,62 @@ router.post('/complete-lesson', authenticateUser, async (req, res) => {
         if (!user) return res.status(404).json({ error: 'User not found' });
         if (user.isBanned) return res.status(403).json({ error: 'Account is banned' });
 
-        // Look up the lesson in the curriculum
-       const found = findLesson(language, safeLevel, lessonId);
+        // ---- Look up lesson ----
+        const found = findLesson(language, safeLevel, lessonId);
 
-let foundLesson;
-let xpEarned;
+        let foundLesson;
+        let xpEarned;
 
-if (found) {
-    foundLesson = found;
-    xpEarned = computeXP({
-        perfect,
-        timeSpentSeconds: safeTime,
-        mistakesCount: safeMistakes,
-        lesson: found.lesson
-    });
-} else {
-    // Lesson not in curriculum. Accept if it's a custom lesson OR the
-    // level number is plausible (1–50). Otherwise reject.
-    const isCustom = String(lessonId).startsWith('custom-');
-    const plausibleLevel = safeLevel >= 1 && safeLevel <= 50;
+        if (found) {
+            foundLesson = found;
+            xpEarned = computeXP({
+                perfect,
+                timeSpentSeconds: safeTime,
+                mistakesCount: safeMistakes,
+                lesson: found.lesson
+            });
+        } else {
+            // Graceful fallback for custom lessons and lessons where the
+            // ID doesn't exactly match. Only reject if BOTH the lesson ID
+            // isn't a custom-* string AND the level is out of range.
+            const isCustom = String(lessonId).startsWith('custom-');
+            const plausibleLevel = safeLevel >= 1 && safeLevel <= 100;
 
-    if (!isCustom && !plausibleLevel) {
-        return res.status(404).json({
-            error: 'Lesson not found in curriculum',
-            language,
-            levelId: safeLevel,
-            lessonId
-        });
-    }
+            if (!isCustom && !plausibleLevel) {
+                return res.status(404).json({
+                    error: 'Lesson not found in curriculum',
+                    language,
+                    levelId: safeLevel,
+                    lessonId
+                });
+            }
 
-    console.warn('complete-lesson: using fallback for unknown lesson', {
-        language,
-        levelId: safeLevel,
-        lessonId,
-        isCustom
-    });
+            console.warn('complete-lesson: using fallback for unknown lesson', {
+                language,
+                levelId: safeLevel,
+                lessonId,
+                isCustom
+            });
 
-    foundLesson = {
-        lesson: { id: lessonId, xpReward: isCustom ? 15 : 25 },
-        level: { level: safeLevel },
-        totalLessonsInLevel: 1,
-        levelLessonIds: [String(lessonId)]
-    };
+            foundLesson = {
+                lesson: { id: lessonId, xpReward: isCustom ? 15 : 25 },
+                level: { level: safeLevel },
+                totalLessonsInLevel: 1,
+                levelLessonIds: [String(lessonId)]
+            };
 
-    xpEarned = computeXP({
-        perfect,
-        timeSpentSeconds: safeTime,
-        mistakesCount: safeMistakes,
-        lesson: foundLesson.lesson
-    });
-}
+            xpEarned = computeXP({
+                perfect,
+                timeSpentSeconds: safeTime,
+                mistakesCount: safeMistakes,
+                lesson: foundLesson.lesson
+            });
+        }
 
-        // Auto-apply streak freeze if user missed exactly one day
+        // ---- Auto-apply streak freeze if user missed exactly one day ----
         await autoApplyFreezeIfNeeded(req.userId, language);
 
+        // ---- Find or create Progress record ----
         let progress = await Progress.findOne({ userId: req.userId, language });
         if (!progress) {
             progress = await Progress.create({
@@ -273,6 +305,7 @@ if (found) {
 
         const dateKey = getDateKey(timezoneOffsetMinutes);
 
+        // ---- Record the completion (or update if repeated) ----
         const existing = await LessonCompletion.findOne({
             userId: req.userId,
             language,
@@ -282,16 +315,14 @@ if (found) {
 
         const isFirstTime = !existing;
 
-        let completion;
         if (existing) {
             existing.xpEarned = Math.max(existing.xpEarned, xpEarned);
             existing.perfect = existing.perfect || perfect;
             existing.mistakesCount = Math.min(existing.mistakesCount, safeMistakes);
             existing.completedAt = new Date();
             await existing.save();
-            completion = existing;
         } else {
-            completion = await LessonCompletion.create({
+            await LessonCompletion.create({
                 userId: req.userId,
                 language,
                 levelId: safeLevel,
@@ -304,9 +335,9 @@ if (found) {
             });
         }
 
-        // ============================================
-        // STREAK (only on first completion of the day)
-        // ============================================
+        /* ============================================
+           STREAK (only on first completion of the day)
+           ============================================ */
         const isFirstLessonToday = progress.lastCompletedDate !== dateKey;
         let streakChanged = false;
 
@@ -328,9 +359,9 @@ if (found) {
             }
         }
 
-        // ============================================
-        // XP + LESSON TRACKING
-        // ============================================
+        /* ============================================
+           XP + LESSON TRACKING
+           ============================================ */
         if (isFirstTime) {
             progress.totalXP += xpEarned;
             progress.weeklyXP = (progress.weeklyXP || 0) + xpEarned;
@@ -349,33 +380,30 @@ if (found) {
             }
         }
 
-        // ============================================
-        // LEVEL COMPLETION (real check against curriculum)
-        // ============================================
+        /* ============================================
+           LEVEL COMPLETION
+           ============================================ */
         let levelCompleted = false;
 
         if (!progress.completedLevels.includes(safeLevel)) {
-            // Count how many lessons of this level the user has completed
             const completedInLevel = await LessonCompletion.countDocuments({
                 userId: req.userId,
                 language,
                 levelId: safeLevel,
-                lessonId: { $in: found.levelLessonIds }
+                lessonId: { $in: foundLesson.levelLessonIds }
             });
 
-            if (completedInLevel >= found.totalLessonsInLevel && found.totalLessonsInLevel > 0) {
+            if (completedInLevel >= foundLesson.totalLessonsInLevel && foundLesson.totalLessonsInLevel > 0) {
                 progress.completedLevels.push(safeLevel);
                 progress.currentLevel = Math.max(progress.currentLevel, safeLevel + 1);
                 levelCompleted = true;
 
-                // Award level completion bonus
                 const levelBonus = 50 + (safeLevel * 10);
                 progress.totalXP += levelBonus;
 
-                // Notify
                 await Notification.create({
                     userId: req.userId,
-                    type: 'pod_milestone',
+                    type: 'level_completed',
                     content: `🎉 Level ${safeLevel} complete in ${language}! +${levelBonus} XP`
                 });
             }
@@ -386,9 +414,9 @@ if (found) {
         progress.lastCompletedLessonAt = new Date();
         await progress.save();
 
-        // ============================================
-        // REFERRAL QUALIFICATION (first-ever lesson)
-        // ============================================
+        /* ============================================
+           REFERRAL QUALIFICATION (first-ever lesson)
+           ============================================ */
         if (isFirstTime && progress.completedLessons.length === 1) {
             const anyOtherProgress = await Progress.findOne({
                 userId: req.userId,
@@ -401,9 +429,9 @@ if (found) {
             }
         }
 
-        // ============================================
-        // WEEKLY FREEZE BONUS
-        // ============================================
+        /* ============================================
+           WEEKLY FREEZE BONUS
+           ============================================ */
         let freezeBonus = { granted: false };
         if (streakChanged) {
             freezeBonus = await grantWeeklyFreezeIfEligible(
@@ -413,9 +441,9 @@ if (found) {
             );
         }
 
-        // ============================================
-        // POD WEEKLY XP UPDATE
-        // ============================================
+        /* ============================================
+           POD WEEKLY XP UPDATE
+           ============================================ */
         if (isFirstTime && xpEarned > 0) {
             const pods = await Pod.find({
                 'members.userId': req.userId,
@@ -423,12 +451,15 @@ if (found) {
                 isActive: true
             });
             for (const pod of pods) {
-                pod.weeklyXP += xpEarned;
-                pod.totalXP += xpEarned;
+                pod.weeklyXP = (pod.weeklyXP || 0) + xpEarned;
+                pod.totalXP = (pod.totalXP || 0) + xpEarned;
                 await pod.save();
             }
         }
 
+        /* ============================================
+           RESPONSE
+           ============================================ */
         res.status(201).json({
             success: true,
             completion: {
@@ -459,10 +490,11 @@ if (found) {
     }
 });
 
-/**
- * POST /api/progress/sync
- * Legacy full sync
- */
+/* ============================================================
+   POST /api/progress/sync
+   Legacy full sync. Used by onboarding to seed the placement
+   level for a fresh language.
+   ============================================================ */
 router.post('/sync', authenticateUser, async (req, res) => {
     const {
         language,
@@ -510,9 +542,10 @@ router.post('/sync', authenticateUser, async (req, res) => {
     }
 });
 
-/**
- * DELETE /api/progress/:language
- */
+/* ============================================================
+   DELETE /api/progress/:language
+   Reset a language's progress.
+   ============================================================ */
 router.delete('/:language', authenticateUser, async (req, res) => {
     const { language } = req.params;
 
@@ -536,14 +569,5 @@ router.delete('/:language', authenticateUser, async (req, res) => {
         res.status(400).json({ error: error.message });
     }
 });
-
-function getDateKey(timezoneOffsetMinutes, shiftMs = 0) {
-    const now = new Date(Date.now() + shiftMs);
-    if (typeof timezoneOffsetMinutes === 'number') {
-        const shifted = new Date(now.getTime() + timezoneOffsetMinutes * 60 * 1000);
-        return shifted.toISOString().slice(0, 10);
-    }
-    return now.toISOString().slice(0, 10);
-}
 
 export default router;
