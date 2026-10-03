@@ -1,5 +1,6 @@
 import express from 'express';
 import Pod from '../models/Pod.js';
+import ReadReceipt from '../models/ReadReceipt.js';
 import PodMessage from '../models/PodMessage.js';
 import User from '../models/User.js';
 import Progress from '../models/Progress.js';
@@ -509,6 +510,35 @@ router.get('/:podId/messages', authenticateUser, async (req, res) => {
         });
     } catch (error) {
         console.error('Get pod messages error:', error);
+        res.status(400).json({ error: error.message });
+    }
+});
+
+
+/* ============================================================
+   POST /api/pods/:podId/read
+   Mark all messages in this pod as read for the current user.
+   ============================================================ */
+router.post('/:podId/read', authenticateUser, async (req, res) => {
+    const { podId } = req.params;
+
+    try {
+        const pod = await Pod.findById(podId);
+        if (!pod) return res.status(404).json({ error: 'Pod not found' });
+
+        if (!pod.members.some(m => m.userId.toString() === req.userId)) {
+            return res.status(403).json({ error: 'Not a member of this pod' });
+        }
+
+        const receipt = await ReadReceipt.findOneAndUpdate(
+            { userId: req.userId, contextType: 'pod', contextId: podId },
+            { lastReadAt: new Date() },
+            { upsert: true, new: true, setDefaultsOnInsert: true }
+        );
+
+        res.json({ success: true, lastReadAt: receipt.lastReadAt });
+    } catch (error) {
+        console.error('Mark pod read error:', error);
         res.status(400).json({ error: error.message });
     }
 });

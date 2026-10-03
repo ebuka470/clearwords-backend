@@ -1,6 +1,7 @@
 import express from 'express';
 import Pair from '../models/Pair.js';
 import PairMessage from '../models/PairMessage.js';
+import ReadReceipt from '../models/ReadReceipt.js';
 import User from '../models/User.js';
 import Notification from '../models/Notification.js';
 import { authenticateUser } from '../middleware/auth.js';
@@ -522,6 +523,34 @@ router.get('/:pairId/messages', authenticateUser, async (req, res) => {
         res.status(400).json({ error: error.message });
     }
 });
+
+/* ============================================================
+   POST /api/pairs/:pairId/read
+   ============================================================ */
+router.post('/:pairId/read', authenticateUser, async (req, res) => {
+    const { pairId } = req.params;
+
+    try {
+        const pair = await Pair.findById(pairId);
+        if (!pair) return res.status(404).json({ error: 'Pair not found' });
+
+        if (pair.userA.toString() !== req.userId && pair.userB.toString() !== req.userId) {
+            return res.status(403).json({ error: 'Not part of this pair' });
+        }
+
+        const receipt = await ReadReceipt.findOneAndUpdate(
+            { userId: req.userId, contextType: 'pair', contextId: pairId },
+            { lastReadAt: new Date() },
+            { upsert: true, new: true, setDefaultsOnInsert: true }
+        );
+
+        res.json({ success: true, lastReadAt: receipt.lastReadAt });
+    } catch (error) {
+        console.error('Mark pair read error:', error);
+        res.status(400).json({ error: error.message });
+    }
+});
+
 
 /* ============================================================
    POST /api/pairs/:pairId/messages
