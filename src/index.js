@@ -17,6 +17,7 @@ import userRoutes from './routes/users.js';
 import progressRoutes from './routes/progress.js';
 import podRoutes from './routes/pods.js';
 import messageRoutes from './routes/messages.js';
+import timmyChatRoutes from './routes/timmyChats.js';
 import pairRoutes from './routes/pairs.js';
 import cardRoutes from './routes/cards.js';
 import reportRoutes from './routes/reports.js';
@@ -174,6 +175,7 @@ app.use('/api/ai', aiRoutes);
 app.use('/api/referrals', referralRoutes);
 app.use('/api/streak', streakRoutes);
 app.use('/api/messages', messageRoutes);
+app.use('/api/timmy-chats', timmyChatRoutes);
 
 // 404
 app.use((req, res) => {
