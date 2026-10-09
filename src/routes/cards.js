@@ -1,6 +1,7 @@
 import express from 'express';
 import ProgressCard from '../models/ProgressCard.js';
 import User from '../models/User.js';
+import Progress from '../models/Progress.js';
 import Pod from '../models/Pod.js';
 import { authenticateUser } from '../middleware/auth.js';
 import { saveCardSVG } from '../utils/cardRenderer.js';
@@ -22,13 +23,22 @@ router.post('/', authenticateUser, async (req, res) => {
         const user = await User.findById(req.userId);
         if (!user) return res.status(404).json({ error: 'User not found' });
 
+        // The client can't be trusted to know its own numbers: read them from Progress
+        const prog = await Progress.findOne({ userId: user._id, language }).lean();
+        const serverStats = prog ? {
+            streak: prog.streak || 0,
+            xp: prog.totalXP || 0,
+            level: prog.currentLevel || 1,
+            lessonsCompleted: (prog.completedLessons || []).length
+        } : {};
+
         const card = await ProgressCard.create({
             userId: user._id,
             username: user.username || user.email.split('@')[0],
             avatarUrl: user.avatarUrl || '',
             language,
             cardType,
-            stats,
+            stats: { ...stats, ...serverStats },
             caption: caption || ''
         });
 

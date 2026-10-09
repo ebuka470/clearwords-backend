@@ -384,6 +384,28 @@ router.patch('/:sectionId/:chatId', authenticateUser, async (req, res) => {
 });
 
 /* ============================================================
+   DELETE /api/timmy-chats/section/:sectionId
+   Delete every chat in a section (used by "Clear section").
+   ============================================================ */
+router.delete('/section/:sectionId', authenticateUser, async (req, res) => {
+    const { sectionId } = req.params;
+    if (!isValidSection(sectionId)) {
+        return res.status(400).json({ error: 'Invalid section' });
+    }
+
+    try {
+        const result = await TimmyChat.deleteMany({
+            userId: req.userId,
+            sectionId
+        });
+        res.json({ success: true, deleted: result.deletedCount });
+    } catch (error) {
+        console.error('Clear Timmy section error:', error);
+        res.status(400).json({ error: error.message });
+    }
+});
+
+/* ============================================================
    DELETE /api/timmy-chats/:sectionId/:chatId
    Delete one chat.
    ============================================================ */
@@ -403,28 +425,6 @@ router.delete('/:sectionId/:chatId', authenticateUser, async (req, res) => {
         res.json({ success: true });
     } catch (error) {
         console.error('Delete Timmy chat error:', error);
-        res.status(400).json({ error: error.message });
-    }
-});
-
-/* ============================================================
-   DELETE /api/timmy-chats/section/:sectionId
-   Delete every chat in a section (used by "Clear section").
-   ============================================================ */
-router.delete('/section/:sectionId', authenticateUser, async (req, res) => {
-    const { sectionId } = req.params;
-    if (!isValidSection(sectionId)) {
-        return res.status(400).json({ error: 'Invalid section' });
-    }
-
-    try {
-        const result = await TimmyChat.deleteMany({
-            userId: req.userId,
-            sectionId
-        });
-        res.json({ success: true, deleted: result.deletedCount });
-    } catch (error) {
-        console.error('Clear Timmy section error:', error);
         res.status(400).json({ error: error.message });
     }
 });

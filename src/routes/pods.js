@@ -83,6 +83,12 @@ router.get('/', authenticateUser, async (req, res) => {
                 weeklyAgg.map(w => [w._id.toString(), w.lessons || 0])
             );
 
+            // Level / XP / streak live in Progress (per language), not on User
+            const memberIds = obj.members.map(m => (m.userId && m.userId._id) || m.userId);
+            const progressDocs = await Progress.find({ userId: { $in: memberIds }, language: pod.language })
+                .select('userId currentLevel totalXP streak').lean();
+            const progressMap = Object.fromEntries(progressDocs.map(pr => [String(pr.userId), pr]));
+
             // Enrich each member with the display fields the frontend needs
             obj.members = obj.members.map(m => {
                 const u = m.userId || {};
@@ -94,8 +100,9 @@ router.get('/', authenticateUser, async (req, res) => {
                     fullName: u.fullName || '',
                     username: u.username || '',
                     avatarUrl: u.avatarUrl || '',
-                    currentLevel: u.currentLevel || 1,
-                    totalXP: u.totalXP || 0,
+                    currentLevel: (progressMap[String(u._id)] || {}).currentLevel || 1,
+                    totalXP: (progressMap[String(u._id)] || {}).totalXP || 0,
+                    streak: (progressMap[String(u._id)] || {}).streak || 0,
                     weeklyXP: weeklyMap[u._id?.toString()] || 0,
                     lastActive: u.lastActive || null
                 };

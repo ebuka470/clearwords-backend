@@ -1,5 +1,8 @@
 import express from 'express';
 import User from '../models/User.js';
+import Progress from '../models/Progress.js';
+import Pod from '../models/Pod.js';
+import Pair from '../models/Pair.js';
 
 import {
     authenticateUser,
@@ -256,6 +259,95 @@ router.get(
 );
 
 // ============================================
+// GET /api/users/:userId/community-profile
+//
+// What a pod / pair member sees when tapping someone's name or photo.
+// WHITELIST ONLY: name, username, avatar, bio, language, joined date and
+// learning progress. Never tier, pods, pairs, email or anything else.
+// Private profiles are visible only to people who share an active pod or
+// an active pair with them (and to the owner).
+// ============================================
+
+router.get(
+    '/:userId/community-profile',
+    authenticateUser,
+    async (req, res) => {
+        const { userId } = req.params;
+        if (!/^[0-9a-fA-F]{24}$/.test(userId)) {
+            return res.status(400).json({ error: 'Invalid user id' });
+        }
+
+        try {
+            const user = await User.findById(userId);
+            if (!user || user.isBanned || user.isActive === false || user.deletedAt) {
+                return res.status(404).json({ error: 'User not found' });
+            }
+
+            const isSelf = String(user._id) === String(req.userId);
+
+            if (!isSelf && user.isPublic === false) {
+                const [sharedPod, sharedPair] = await Promise.all([
+                    Pod.exists({
+                        isActive: true,
+                        $and: [{ 'members.userId': req.userId }, { 'members.userId': user._id }]
+                    }),
+                    Pair.exists({
+                        status: 'active',
+                        $or: [
+                            { userA: req.userId, userB: user._id },
+                            { userA: user._id, userB: req.userId }
+                        ]
+                    })
+                ]);
+                if (!sharedPod && !sharedPair) {
+                    return res.json({ profile: {
+                        id: user._id,
+                        fullName: user.fullName,
+                        username: user.username,
+                        avatarUrl: user.avatarUrl,
+                        isPublic: false,
+                        message: 'This profile is private'
+                    }});
+                }
+            }
+
+            const records = await Progress.find({ userId: user._id }).lean();
+            const languages = records.map(r => ({
+                language: r.language,
+                currentLevel: r.currentLevel || 1,
+                totalXP: r.totalXP || 0,
+                streak: r.streak || 0,
+                lessonsCompleted: (r.completedLessons || []).length
+            })).sort((a, b) => b.totalXP - a.totalXP);
+
+            const wanted = String(req.query.language || '').toLowerCase();
+            const main = languages.find(l => l.language === wanted)
+                || languages.find(l => l.language === user.language)
+                || languages[0]
+                || { language: user.language, currentLevel: 1, totalXP: 0, streak: 0, lessonsCompleted: 0 };
+
+            return res.json({ profile: {
+                id: user._id,
+                fullName: user.fullName,
+                username: user.username,
+                avatarUrl: user.avatarUrl,
+                bio: user.bio || '',
+                language: main.language,
+                streak: main.streak,
+                totalXP: main.totalXP,
+                currentLevel: main.currentLevel,
+                lessonsCompleted: main.lessonsCompleted,
+                languages,
+                createdAt: user.createdAt
+            }});
+        } catch (error) {
+            console.error('Community profile error:', error);
+            return res.status(400).json({ error: 'Could not retrieve profile' });
+        }
+    }
+);
+
+// ============================================
 // GET /api/users/:identifier
 //
 // Public profile. Authentication is optional.
@@ -326,9 +418,6 @@ router.get(
                 language: user.language,
                 learningLanguages: user.learningLanguages,
                 teachingLanguages: user.teachingLanguages,
-                subscriptionTier: user.subscriptionTier,
-                podsJoined: user.podsJoined,
-                activePairs: user.activePairs,
                 cardsShared: user.cardsShared,
                 createdAt: user.createdAt
             };
@@ -338,6 +427,9 @@ router.get(
             // ------------------------------------
 
             if (isSelf) {
+                publicProfile.subscriptionTier = user.subscriptionTier;
+                publicProfile.podsJoined = user.podsJoined;
+                publicProfile.activePairs = user.activePairs;
                 publicProfile.email = user.email;
                 publicProfile.phone = user.phone;
                 publicProfile.emailVerified = user.emailVerified;

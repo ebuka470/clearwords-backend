@@ -109,6 +109,34 @@ async function computePairFlags(userA, userB, enableVoice = true, enableVideo = 
     return { voiceEnabled, videoEnabled };
 }
 
+/**
+ * Live call access for the VIEWER of a pair, mirroring POST /:pairId/call/start.
+ * The stored pair.voiceEnabled/videoEnabled flags are only set when a pair is
+ * accepted, so they go stale after a tier upgrade. This recomputes from the
+ * current tiers of both users and says WHY a call is blocked.
+ */
+async function liveCallAccess(pair, viewer, partner) {
+    const v = getUserLimits(viewer);
+    const p = getUserLimits(partner);
+    const decide = async (feature, capKey, flagKey, counter) => {
+        if (!v[feature]) return { ok: false, reason: 'self_tier' };
+        if (!p[feature]) return { ok: false, reason: 'partner_tier' };
+        if (v[capKey] !== Infinity && !pair[flagKey]) {
+            const used = await counter(viewer);
+            if (used >= v[capKey]) return { ok: false, reason: 'slots' };
+        }
+        return { ok: true, reason: null };
+    };
+    const voice = await decide('voice', 'voicePairs', 'voiceEnabled', countVoicePairs);
+    const video = await decide('video', 'videoPairs', 'videoEnabled', countVideoPairs);
+    return {
+        voiceEnabled: voice.ok,
+        videoEnabled: video.ok,
+        voiceBlockedReason: voice.reason,
+        videoBlockedReason: video.reason
+    };
+}
+
 /* ============================================================
    GET /api/pairs
    ============================================================ */
@@ -122,7 +150,23 @@ router.get('/', authenticateUser, async (req, res) => {
         .populate('userB', 'fullName username avatarUrl learningLanguages teachingLanguages language')
         .sort({ lastActivityAt: -1 });
 
-        const shaped = pairs.map(p => shapePair(p, req.userId));
+        const viewer = await User.findById(req.userId);
+        const partnerIds = pairs.map(p =>
+            extractId(p.userA) === String(req.userId) ? extractId(p.userB) : extractId(p.userA)
+        );
+        const partners = await User.find({ _id: { $in: partnerIds } })
+            .select('subscriptionTier subscriptionExpires');
+        const partnerMap = Object.fromEntries(partners.map(u => [String(u._id), u]));
+
+        const shaped = [];
+        for (const p of pairs) {
+            const obj = shapePair(p, req.userId);
+            const partner = partnerMap[obj.partnerId];
+            if (p.status === 'active' && viewer && partner) {
+                Object.assign(obj, await liveCallAccess(p, viewer, partner));
+            }
+            shaped.push(obj);
+        }
 
         res.json({
             data: shaped,
