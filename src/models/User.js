@@ -121,6 +121,7 @@ const UserSchema = new mongoose.Schema({
     createdAt: { type: Date, default: Date.now },
     updatedAt: { type: Date, default: Date.now },
     lastActive: { type: Date, default: Date.now },
+    streakReminderDate: { type: String, default: null },
     deletedAt: { type: Date, default: null }
 });
 

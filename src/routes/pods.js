@@ -5,6 +5,7 @@ import PodMessage from '../models/PodMessage.js';
 import User from '../models/User.js';
 import Progress from '../models/Progress.js';
 import Notification from '../models/Notification.js';
+import { sendPushToUser } from '../services/pushService.js';
 import { authenticateUser } from '../middleware/auth.js';
 import { moderationMiddleware } from '../middleware/moderation.js';
 import { canJoinPod, getUserLimits } from '../middleware/tierGate.js';
@@ -588,6 +589,18 @@ router.post('/:podId/messages', authenticateUser, moderationMiddleware, async (r
 
         const obj = message.toObject();
         obj.isMine = true;
+            // Fire-and-forget push to everyone else in the pod
+    pod.members.forEach(member => {
+      const uid = member.userId.toString();
+      if (uid === req.userId) return;
+      sendPushToUser(uid, {
+        title: pod.name || 'New pod message',
+        body: `${user.fullName || 'Someone'}: ${messageText.slice(0, 60)}${messageText.length > 60 ? '…' : ''}`,
+        url: '/community.html',
+        tag: `pod-${pod._id}`,
+        data: { podId: String(pod._id) }
+      }).catch(() => {});
+    });
         res.status(201).json(obj);
     } catch (error) {
         console.error('Send pod message error:', error);

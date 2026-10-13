@@ -4,6 +4,7 @@ import PairMessage from '../models/PairMessage.js';
 import ReadReceipt from '../models/ReadReceipt.js';
 import User from '../models/User.js';
 import Notification from '../models/Notification.js';
+import { sendPushToUser } from '../services/pushService.js';
 import { authenticateUser } from '../middleware/auth.js';
 import { moderationMiddleware } from '../middleware/moderation.js';
 import { canCreatePair, getUserLimits } from '../middleware/tierGate.js';
@@ -628,6 +629,19 @@ router.post('/:pairId/messages', authenticateUser, moderationMiddleware, async (
 
         pair.lastActivityAt = new Date();
         await pair.save();
+
+            // Push the other side of the pair
+    const partnerId = pair.userA.toString() === req.userId ? pair.userB : pair.userA;
+    const sender = await User.findById(req.userId).select('fullName username');
+    const displayName = sender?.fullName || sender?.username || 'Your partner';
+
+    sendPushToUser(partnerId.toString(), {
+      title: displayName,
+      body: messageText.slice(0, 80) + (messageText.length > 80 ? '…' : ''),
+      url: '/community.html',
+      tag: `pair-${pair._id}`,
+      data: { pairId: String(pair._id) }
+    }).catch(() => {});
 
         const obj = message.toObject();
         obj.isMine = true;

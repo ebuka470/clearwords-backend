@@ -27,10 +27,12 @@ import curriculumRoutes from './routes/curriculum.js';
 import ttsRouter from './routes/tts.js';
 import aiRoutes from './routes/ai.js';
 import referralRoutes from './routes/referrals.js';
+import pushRoutes from './routes/push.js';
 import streakRoutes from './routes/streak.js';
 
 // Background jobs
 import { startPairDissolver } from './jobs/pairDissolver.js';
+import { startStreakReminderJob } from './jobs/streakReminder.js';
 import { startWeeklyStreakJob } from './jobs/weeklyStreak.js';
 import { startDormantPodJob } from './jobs/dormantPods.js';
 
@@ -176,6 +178,7 @@ app.use('/api/referrals', referralRoutes);
 app.use('/api/streak', streakRoutes);
 app.use('/api/messages', messageRoutes);
 app.use('/api/timmy-chats', timmyChatRoutes);
+app.use('/api/push', pushRoutes);
 
 // 404
 app.use((req, res) => {
@@ -192,6 +195,7 @@ app.use((err, req, res, next) => {
 startPairDissolver();
 startWeeklyStreakJob();
 startDormantPodJob();
+startStreakReminderJob();
 
 // Keep-alive
 const keepAliveUrl = 'https://clearwords-backend.onrender.com/health';
