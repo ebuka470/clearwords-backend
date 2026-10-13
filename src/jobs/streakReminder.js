@@ -81,6 +81,8 @@ export async function sendStreakReminders() {
       await sendPushToUser(user._id, {
         title: `🔥 ${streak}-day streak, ${firstName}`,
         body: "5 minutes today keeps it going. Timmy's waiting.",
+        icon: '/icons/fire-192.png',
+        badge: '/badge-72.png',
         url: '/learn.html',
         tag: 'cw-streak-reminder',
         renotify: false
