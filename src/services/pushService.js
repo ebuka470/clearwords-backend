@@ -24,7 +24,8 @@ function ensureConfigured() {
  * payload: { title, body, url?, icon?, tag?, actions?, data? }
  * returns: { sent, failed }
  */
-export async function sendPushToUser(userId, payload) {
+// services/pushService.js
+export async function sendPushToUser(userId, payload, { urgency = 'normal' } = {}) {
   if (!ensureConfigured()) return { sent: 0, failed: 0 };
 
   const subs = await PushSubscription.find({ userId });
@@ -41,25 +42,15 @@ export async function sendPushToUser(userId, payload) {
           keys: { p256dh: sub.keys.p256dh, auth: sub.keys.auth }
         },
         body,
-        { TTL: 60 * 60 * 24 } // 24h
+        { 
+          TTL: 60 * 60 * 24,
+          urgency: urgency // 👈 Add this line
+        }
       );
       sent++;
-
-      // Cheap update — non-blocking
-      PushSubscription.updateOne(
-        { _id: sub._id },
-        { $set: { lastUsedAt: new Date() } }
-      ).catch(() => {});
+      // ... rest of the code
     } catch (err) {
-      failed++;
-      const status = err?.statusCode;
-
-      // 404/410 → the subscription is dead, remove it
-      if (status === 404 || status === 410) {
-        await PushSubscription.deleteOne({ _id: sub._id }).catch(() => {});
-      } else {
-        console.warn('[Push] sendNotification failed:', status, err?.body || err?.message);
-      }
+      // ... error handling
     }
   }));
 
