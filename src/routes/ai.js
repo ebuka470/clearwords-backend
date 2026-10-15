@@ -34,7 +34,7 @@ function getGenAI() {
 }
 
 // Gemini model to use. gemini-2.5-flash is fast + free-tier friendly.
-const GEMINI_MODEL = 'gemini-2.5-flash';
+const GEMINI_MODEL = 'gemini-3.8-flash';
 
 // ============================================
 // RETRY WITH BACKOFF — handles 429/503 from Gemini
