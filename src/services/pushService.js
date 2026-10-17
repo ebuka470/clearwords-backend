@@ -24,7 +24,6 @@ function ensureConfigured() {
  * payload: { title, body, url?, icon?, tag?, actions?, data? }
  * returns: { sent, failed }
  */
-// services/pushService.js
 export async function sendPushToUser(userId, payload, { urgency = 'normal' } = {}) {
   if (!ensureConfigured()) return { sent: 0, failed: 0 };
 
@@ -42,15 +41,30 @@ export async function sendPushToUser(userId, payload, { urgency = 'normal' } = {
           keys: { p256dh: sub.keys.p256dh, auth: sub.keys.auth }
         },
         body,
-        { 
+        {
           TTL: 60 * 60 * 24,
-          urgency: urgency // 👈 Add this line
+          urgency
         }
       );
       sent++;
-      // ... rest of the code
+
+      // Touch lastUsedAt (non-blocking)
+      PushSubscription.updateOne(
+        { _id: sub._id },
+        { $set: { lastUsedAt: new Date() } }
+      ).catch(() => {});
     } catch (err) {
-      // ... error handling
+      failed++;
+      const status = err?.statusCode;
+
+      // Subscription is dead — the browser told the push service
+      // this endpoint no longer exists (uninstalled PWA, cleared data, etc.)
+      if (status === 404 || status === 410) {
+        await PushSubscription.deleteOne({ _id: sub._id }).catch(() => {});
+        console.warn(`[Push] Removed dead subscription for user ${userId} (${status})`);
+      } else {
+        console.warn('[Push] sendNotification failed:', status, err?.body || err?.message);
+      }
     }
   }));
 
@@ -60,7 +74,7 @@ export async function sendPushToUser(userId, payload, { urgency = 'normal' } = {
 /**
  * Fan out to many users. Returns an array of per-user results.
  */
-export async function sendPushToUsers(userIds, payload) {
+export async function sendPushToUsers(userIds, payload, opts) {
   const unique = [...new Set(userIds.map(String))];
-  return Promise.all(unique.map(id => sendPushToUser(id, payload)));
+  return Promise.all(unique.map(id => sendPushToUser(id, payload, opts)));
 }
