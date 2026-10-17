@@ -2,6 +2,7 @@ import mongoose from 'mongoose';
 
 const ProgressCardSchema = new mongoose.Schema({
     userId: { type: mongoose.Schema.Types.ObjectId, ref: 'User', required: true, index: true },
+    profileId: { type: mongoose.Schema.Types.ObjectId, default: null, index: true },
     username: { type: String, required: true },
     avatarUrl: { type: String, default: '' },
 
@@ -23,7 +24,6 @@ const ProgressCardSchema = new mongoose.Schema({
 
     caption: { type: String, maxlength: 200, default: '' },
 
-    // Rendered image
     imageUrl: { type: String, default: '' },
     imagePath: { type: String, default: '' },
     rendered: { type: Boolean, default: false },
@@ -35,7 +35,7 @@ const ProgressCardSchema = new mongoose.Schema({
     createdAt: { type: Date, default: Date.now }
 });
 
-ProgressCardSchema.index({ userId: 1, createdAt: -1 });
+ProgressCardSchema.index({ userId: 1, profileId: 1, createdAt: -1 });
 
 const ProgressCard = mongoose.model('ProgressCard', ProgressCardSchema);
 

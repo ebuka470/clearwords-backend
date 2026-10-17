@@ -1,5 +1,14 @@
 import mongoose from 'mongoose';
 
+const FamilyProfileSchema = new mongoose.Schema({
+    name: { type: String, required: true, maxlength: 40 },
+    emoji: { type: String, default: '🧑' },
+    color: { type: String, default: '#2E8B57' },
+    language: { type: String, default: null },
+    role: { type: String, enum: ['owner', 'learner'], default: 'learner' },
+    createdAt: { type: Date, default: Date.now }
+}, { _id: true });
+
 const UserSchema = new mongoose.Schema({
     email: {
         type: String,
@@ -71,6 +80,14 @@ const UserSchema = new mongoose.Schema({
         enum: ['zero', 'few_words', 'some', 'little', 'comfortable'],
         default: 'zero'
     },
+
+    // ============================================
+    // FAMILY ACCOUNTS
+    // ============================================
+    familyProfiles: { type: [FamilyProfileSchema], default: [] },
+    activeProfileId: { type: mongoose.Schema.Types.ObjectId, default: null },
+    familyIntent: { type: Boolean, default: false },
+    familyPromptDismissedAt: { type: Date, default: null },
 
     timezoneOffsetMinutes: { type: Number, default: null },
     learningLanguages: [{ type: String }],

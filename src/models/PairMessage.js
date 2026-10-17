@@ -2,6 +2,7 @@ import mongoose from 'mongoose';
 
 const PairMessageSchema = new mongoose.Schema({
     pairId: { type: mongoose.Schema.Types.ObjectId, ref: 'Pair', required: true, index: true },
+    profileId: { type: mongoose.Schema.Types.ObjectId, default: null, index: true },
     senderId: { type: mongoose.Schema.Types.ObjectId, ref: 'User', required: true },
     text: { type: String, required: true, maxlength: 2000 },
     isDeleted: { type: Boolean, default: false },

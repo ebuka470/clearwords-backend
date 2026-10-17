@@ -3,29 +3,29 @@ import User from '../models/User.js';
 import Progress from '../models/Progress.js';
 import StreakFreeze from '../models/StreakFreeze.js';
 import { authenticateUser } from '../middleware/auth.js';
+import { resolveProfile } from '../middleware/profile.js';
 
 const router = express.Router();
 
-// ============================================
-// CONFIG
-// ============================================
-const XP_COST_PER_FREEZE = 200;         // Buy a freeze for 200 XP
-const MAX_FREEZES = 3;                  // Cap inventory
-const FREE_WEEKLY_FREEZE_THRESHOLD = 7; // 7-day streak = 1 free freeze
+const XP_COST_PER_FREEZE = 200;
+const MAX_FREEZES = 3;
+const FREE_WEEKLY_FREEZE_THRESHOLD = 7;
 
-// ============================================
-// GET /api/streak/freezes
-// Current freeze inventory
-// ============================================
-router.get('/freezes', authenticateUser, async (req, res) => {
+/* ============================================================
+   GET /api/streak/freezes
+   ============================================================ */
+router.get('/freezes', authenticateUser, resolveProfile, async (req, res) => {
     try {
         const { language } = req.query;
-
         if (!language) {
             return res.status(400).json({ error: 'language query param required' });
         }
 
-        const freeze = await StreakFreeze.findOne({ userId: req.userId, language });
+        const freeze = await StreakFreeze.findOne({
+            userId: req.userId,
+            profileId: req.profileId || null,
+            language
+        });
 
         res.json({
             language,
@@ -40,25 +40,26 @@ router.get('/freezes', authenticateUser, async (req, res) => {
     }
 });
 
-// ============================================
-// POST /api/streak/freezes/buy
-// Buy a freeze with XP
-// ============================================
-router.post('/freezes/buy', authenticateUser, async (req, res) => {
+/* ============================================================
+   POST /api/streak/freezes/buy
+   ============================================================ */
+router.post('/freezes/buy', authenticateUser, resolveProfile, async (req, res) => {
     const { language } = req.body;
-
     if (!language) return res.status(400).json({ error: 'language required' });
 
+    const profileScope = { profileId: req.profileId || null };
+
     try {
-        const progress = await Progress.findOne({ userId: req.userId, language });
+        const progress = await Progress.findOne({ userId: req.userId, ...profileScope, language });
         if (!progress) {
             return res.status(404).json({ error: 'No progress found for this language' });
         }
 
-        let freeze = await StreakFreeze.findOne({ userId: req.userId, language });
+        let freeze = await StreakFreeze.findOne({ userId: req.userId, ...profileScope, language });
         if (!freeze) {
             freeze = await StreakFreeze.create({
                 userId: req.userId,
+                ...profileScope,
                 language,
                 available: 0
             });
@@ -79,21 +80,12 @@ router.post('/freezes/buy', authenticateUser, async (req, res) => {
             });
         }
 
-        // Deduct XP, add freeze
         progress.totalXP -= XP_COST_PER_FREEZE;
         await progress.save();
 
         freeze.available += 1;
-        freeze.purchases.push({
-            source: 'xp',
-            xpCost: XP_COST_PER_FREEZE
-        });
+        freeze.purchases.push({ source: 'xp', xpCost: XP_COST_PER_FREEZE });
         await freeze.save();
-
-        // Keep user in sync
-        await User.findByIdAndUpdate(req.userId, {
-            $set: { streakFreezesAvailable: freeze.available }
-        });
 
         res.json({
             success: true,
@@ -107,20 +99,18 @@ router.post('/freezes/buy', authenticateUser, async (req, res) => {
     }
 });
 
-// ============================================
-// POST /api/streak/freezes/toggle-auto
-// ============================================
-router.post('/freezes/toggle-auto', authenticateUser, async (req, res) => {
+/* ============================================================
+   POST /api/streak/freezes/toggle-auto
+   ============================================================ */
+router.post('/freezes/toggle-auto', authenticateUser, resolveProfile, async (req, res) => {
     const { language: bodyLanguage, autoApply, enabled } = req.body || {};
 
-    // Accept `autoApply` (backend canonical) OR `enabled` (frontend)
     const resolvedAutoApply = typeof autoApply === 'boolean'
         ? autoApply
         : typeof enabled === 'boolean'
             ? enabled
             : null;
 
-    // Default language from user
     let language = bodyLanguage;
     if (!language) {
         const u = await User.findById(req.userId).select('language');
@@ -128,14 +118,12 @@ router.post('/freezes/toggle-auto', authenticateUser, async (req, res) => {
     }
 
     if (resolvedAutoApply === null) {
-        return res.status(400).json({
-            error: 'autoApply (or enabled) boolean is required'
-        });
+        return res.status(400).json({ error: 'autoApply (or enabled) boolean is required' });
     }
 
     try {
         const freeze = await StreakFreeze.findOneAndUpdate(
-            { userId: req.userId, language },
+            { userId: req.userId, profileId: req.profileId || null, language },
             { autoApply: resolvedAutoApply },
             { new: true, upsert: true, setDefaultsOnInsert: true }
         );
@@ -147,27 +135,24 @@ router.post('/freezes/toggle-auto', authenticateUser, async (req, res) => {
     }
 });
 
-// ============================================
-// POST /api/streak/recover
-// Recover a broken streak by spending a freeze
-// Called when user opens the app after missing a day
-// ============================================
-router.post('/recover', authenticateUser, async (req, res) => {
+/* ============================================================
+   POST /api/streak/recover
+   ============================================================ */
+router.post('/recover', authenticateUser, resolveProfile, async (req, res) => {
     const { language } = req.body;
-
     if (!language) return res.status(400).json({ error: 'language required' });
 
+    const profileScope = { profileId: req.profileId || null };
+
     try {
-        const progress = await Progress.findOne({ userId: req.userId, language });
+        const progress = await Progress.findOne({ userId: req.userId, ...profileScope, language });
         if (!progress) return res.status(404).json({ error: 'No progress found' });
 
-        const freeze = await StreakFreeze.findOne({ userId: req.userId, language });
+        const freeze = await StreakFreeze.findOne({ userId: req.userId, ...profileScope, language });
         if (!freeze || freeze.available < 1) {
             return res.status(400).json({ error: 'No streak freeze available' });
         }
 
-        // Check if streak was actually broken recently
-        // We compare lastCompletedDate to today — if it's more than 1 day back, streak is broken
         const today = new Date().toISOString().slice(0, 10);
         const yesterday = new Date(Date.now() - 86400000).toISOString().slice(0, 10);
 
@@ -175,8 +160,6 @@ router.post('/recover', authenticateUser, async (req, res) => {
             return res.status(400).json({ error: 'Streak is active — no recovery needed' });
         }
 
-        // Recover: restore streak to 1 (or preserve the previous best minus one gap)
-        // Simple policy: restore the previous streak value, cap at longestStreak
         const previousStreak = progress.longestStreak || 1;
 
         freeze.available -= 1;
@@ -191,10 +174,6 @@ router.post('/recover', authenticateUser, async (req, res) => {
         progress.lastCompletedDate = today;
         await progress.save();
 
-        await User.findByIdAndUpdate(req.userId, {
-            $set: { streakFreezesAvailable: freeze.available }
-        });
-
         res.json({
             success: true,
             restoredStreak: previousStreak,
@@ -206,26 +185,24 @@ router.post('/recover', authenticateUser, async (req, res) => {
     }
 });
 
-// ============================================
-// INTERNAL — called from progress.js after lesson completion
-// Auto-applies a freeze if user missed a day and has autoApply on.
-// ============================================
-export async function autoApplyFreezeIfNeeded(userId, language) {
+/* ============================================================
+   INTERNAL — auto-applies freeze (called from progress.js)
+   ============================================================ */
+export async function autoApplyFreezeIfNeeded(userId, profileId, language) {
     try {
-        const freeze = await StreakFreeze.findOne({ userId, language });
+        const scope = { userId, profileId: profileId || null, language };
+        const freeze = await StreakFreeze.findOne(scope);
         if (!freeze || !freeze.autoApply || freeze.available < 1) {
             return { applied: false };
         }
 
-        const progress = await Progress.findOne({ userId, language });
+        const progress = await Progress.findOne(scope);
         if (!progress || !progress.lastCompletedDate) return { applied: false };
 
         const today = new Date().toISOString().slice(0, 10);
         const yesterday = new Date(Date.now() - 86400000).toISOString().slice(0, 10);
 
-        // If last completed date is NOT today and NOT yesterday, a day was missed
         if (progress.lastCompletedDate !== today && progress.lastCompletedDate !== yesterday) {
-            // Only auto-apply if the gap is exactly 1 day
             const last = new Date(progress.lastCompletedDate);
             const gapDays = Math.floor((new Date(today) - last) / 86400000);
 
@@ -237,11 +214,6 @@ export async function autoApplyFreezeIfNeeded(userId, language) {
                     previousStreak: progress.streak
                 });
                 await freeze.save();
-
-                await User.findByIdAndUpdate(userId, {
-                    $set: { streakFreezesAvailable: freeze.available }
-                });
-
                 return { applied: true, protectedDate: yesterday };
             }
         }
@@ -253,13 +225,13 @@ export async function autoApplyFreezeIfNeeded(userId, language) {
     }
 }
 
-// ============================================
-// INTERNAL — grant free weekly freeze on 7-day streak
-// ============================================
-export async function grantWeeklyFreezeIfEligible(userId, language, streak) {
+/* ============================================================
+   INTERNAL — grant weekly freeze
+   ============================================================ */
+export async function grantWeeklyFreezeIfEligible(userId, profileId, language, streak) {
     if (streak > 0 && streak % FREE_WEEKLY_FREEZE_THRESHOLD === 0) {
         const freeze = await StreakFreeze.findOneAndUpdate(
-            { userId, language },
+            { userId, profileId: profileId || null, language },
             {
                 $inc: { available: 1 },
                 $push: {
@@ -273,15 +245,10 @@ export async function grantWeeklyFreezeIfEligible(userId, language, streak) {
             { new: true, upsert: true, setDefaultsOnInsert: true }
         );
 
-        // Cap
         if (freeze.available > MAX_FREEZES) {
             freeze.available = MAX_FREEZES;
             await freeze.save();
         }
-
-        await User.findByIdAndUpdate(userId, {
-            $set: { streakFreezesAvailable: freeze.available }
-        });
 
         return { granted: true, available: freeze.available };
     }

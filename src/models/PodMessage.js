@@ -13,6 +13,7 @@ const PodMessageSchema = new mongoose.Schema({
         required: true,
         index: true
     },
+    profileId: { type: mongoose.Schema.Types.ObjectId, default: null, index: true },
     authorUsername: { type: String, required: true },
     authorAvatar: { type: String, default: '' },
     authorName: { type: String, default: '' },
@@ -24,8 +25,6 @@ const PodMessageSchema = new mongoose.Schema({
         default: 'text'
     },
 
-    // For check-in messages: numeric count of lessons reported.
-    // Stored as a real number so leaderboard aggregation is trivial.
     lessonsCompleted: { type: Number, default: 0, min: 0 },
 
     isDeleted: { type: Boolean, default: false },

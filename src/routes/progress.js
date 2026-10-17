@@ -9,6 +9,7 @@ import LessonCompletion from '../models/LessonCompletion.js';
 import Pod from '../models/Pod.js';
 import Notification from '../models/Notification.js';
 import { authenticateUser } from '../middleware/auth.js';
+import { resolveProfile } from '../middleware/profile.js';
 import { qualifyReferralForUser } from './referrals.js';
 import { autoApplyFreezeIfNeeded, grantWeeklyFreezeIfEligible } from './streak.js';
 
@@ -16,8 +17,6 @@ const router = express.Router();
 
 /* ============================================================
    CURRICULUM CACHE
-   Loads every data/*.json at server start so lesson lookups
-   never touch disk during a request.
    ============================================================ */
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = dirname(__filename);
@@ -50,18 +49,6 @@ try {
 /* ============================================================
    HELPERS
    ============================================================ */
-
-/**
- * Look up a lesson in the curriculum. Handles two shapes:
- *
- *   Format A — levels have a nested `lessons: [...]` array
- *              { level: 1, lessons: [{ id: '1-1', vocabulary: [...] }] }
- *
- *   Format B — the level IS the lesson
- *              { level: 1, vocabulary: [...], dialogue: [...] }
- *
- * Returns { lesson, level, totalLessonsInLevel, levelLessonIds } or null.
- */
 function findLesson(language, levelId, lessonId) {
     const lang = CURRICULUM[language];
     if (!lang) return null;
@@ -69,13 +56,10 @@ function findLesson(language, levelId, lessonId) {
     const levels = lang.levels || lang.curriculum?.levels || [];
     if (!levels.length) return null;
 
-    // ---- Locate the level ----
-    // Your data files use `level` as the key. Fall back to `id`.
     let level = levels.find(l => Number(l.level) === Number(levelId));
     if (!level) level = levels.find(l => Number(l.id) === Number(levelId));
     if (!level) return null;
 
-    // ---- Custom lessons: never in the curriculum, always valid ----
     if (String(lessonId).startsWith('custom-')) {
         return {
             lesson: { id: lessonId, xpReward: 15 },
@@ -85,7 +69,6 @@ function findLesson(language, levelId, lessonId) {
         };
     }
 
-    // ---- Format A — nested lessons ----
     if (Array.isArray(level.lessons) && level.lessons.length) {
         const lesson = level.lessons.find(l =>
             String(l.id) === String(lessonId) ||
@@ -100,9 +83,6 @@ function findLesson(language, levelId, lessonId) {
         };
     }
 
-    // ---- Format B — the level IS the lesson ----
-    // Accept several plausible ID shapes for the same level:
-    //   "1", "level-1", "level-1-anything", the level's own id, its title
     const acceptedIds = [
         String(levelId),
         `level-${levelId}`,
@@ -125,29 +105,15 @@ function findLesson(language, levelId, lessonId) {
     };
 }
 
-/**
- * Server-computed XP. Never trusts the client.
- *   Base: lesson.xpReward (or 10 if absent)
- *   Perfect bonus: +50%
- *   Speed bonus: +20% if completed under 60s
- *   Mistake penalty: −2 XP per mistake (min 5 XP)
- *   Cap: 200 XP
- */
 function computeXP({ perfect, timeSpentSeconds, mistakesCount, lesson }) {
     let xp = lesson?.xpReward || 10;
-
     if (perfect) xp = Math.round(xp * 1.5);
     if (timeSpentSeconds > 0 && timeSpentSeconds < 60) xp = Math.round(xp * 1.2);
-
     xp = Math.max(5, xp - (mistakesCount * 2));
     xp = Math.min(xp, 200);
-
     return xp;
 }
 
-/**
- * Date key in the user's timezone, e.g. '2026-10-02'.
- */
 function getDateKey(timezoneOffsetMinutes, shiftMs = 0) {
     const now = new Date(Date.now() + shiftMs);
     if (typeof timezoneOffsetMinutes === 'number') {
@@ -159,14 +125,12 @@ function getDateKey(timezoneOffsetMinutes, shiftMs = 0) {
 
 /* ============================================================
    GET /api/progress
-   Fetch the user's progress for one language (creates an empty
-   record on first access).
    ============================================================ */
-router.get('/', authenticateUser, async (req, res) => {
+router.get('/', authenticateUser, resolveProfile, async (req, res) => {
     const { language } = req.query;
 
     try {
-        const query = { userId: req.userId };
+        const query = { userId: req.userId, profileId: req.profileId || null };
         if (language) query.language = language;
 
         let progress = await Progress.findOne(query);
@@ -174,6 +138,7 @@ router.get('/', authenticateUser, async (req, res) => {
         if (!progress) {
             progress = await Progress.create({
                 userId: req.userId,
+                profileId: req.profileId || null,
                 language: language || 'yoruba',
                 completedLevels: [],
                 completedLessons: [],
@@ -192,11 +157,8 @@ router.get('/', authenticateUser, async (req, res) => {
 
 /* ============================================================
    POST /api/progress/complete-lesson
-   The core learning endpoint. Accepts either `levelId` or
-   `levelNumber`; tolerates missing `language` by defaulting
-   to the user's primary language.
    ============================================================ */
-router.post('/complete-lesson', authenticateUser, async (req, res) => {
+router.post('/complete-lesson', authenticateUser, resolveProfile, async (req, res) => {
     const {
         language: bodyLanguage,
         levelId,
@@ -209,14 +171,12 @@ router.post('/complete-lesson', authenticateUser, async (req, res) => {
         timezoneOffsetMinutes
     } = req.body;
 
-    // Resolve language
     let language = bodyLanguage;
     if (!language) {
         const u = await User.findById(req.userId).select('language');
         language = u?.language || 'yoruba';
     }
 
-    // Resolve level from either alias
     const resolvedLevel = levelId != null ? levelId : levelNumber;
 
     if (!language || resolvedLevel == null || !lessonId) {
@@ -228,13 +188,13 @@ router.post('/complete-lesson', authenticateUser, async (req, res) => {
     const safeLevel = Number(resolvedLevel);
     const safeTime = Math.min(Math.max(0, Number(timeSpentSeconds) || 0), 3600);
     const safeMistakes = Math.min(Math.max(0, Number(mistakesCount) || 0), 100);
+    const profileScope = { profileId: req.profileId || null };
 
     try {
         const user = await User.findById(req.userId);
         if (!user) return res.status(404).json({ error: 'User not found' });
         if (user.isBanned) return res.status(403).json({ error: 'Account is banned' });
 
-        // ---- Look up lesson ----
         const found = findLesson(language, safeLevel, lessonId);
 
         let foundLesson;
@@ -249,9 +209,6 @@ router.post('/complete-lesson', authenticateUser, async (req, res) => {
                 lesson: found.lesson
             });
         } else {
-            // Graceful fallback for custom lessons and lessons where the
-            // ID doesn't exactly match. Only reject if BOTH the lesson ID
-            // isn't a custom-* string AND the level is out of range.
             const isCustom = String(lessonId).startsWith('custom-');
             const plausibleLevel = safeLevel >= 1 && safeLevel <= 100;
 
@@ -263,13 +220,6 @@ router.post('/complete-lesson', authenticateUser, async (req, res) => {
                     lessonId
                 });
             }
-
-            console.warn('complete-lesson: using fallback for unknown lesson', {
-                language,
-                levelId: safeLevel,
-                lessonId,
-                isCustom
-            });
 
             foundLesson = {
                 lesson: { id: lessonId, xpReward: isCustom ? 15 : 25 },
@@ -286,14 +236,13 @@ router.post('/complete-lesson', authenticateUser, async (req, res) => {
             });
         }
 
-        // ---- Auto-apply streak freeze if user missed exactly one day ----
-        await autoApplyFreezeIfNeeded(req.userId, language);
+        await autoApplyFreezeIfNeeded(req.userId, req.profileId || null, language);
 
-        // ---- Find or create Progress record ----
-        let progress = await Progress.findOne({ userId: req.userId, language });
+        let progress = await Progress.findOne({ userId: req.userId, ...profileScope, language });
         if (!progress) {
             progress = await Progress.create({
                 userId: req.userId,
+                ...profileScope,
                 language,
                 completedLevels: [],
                 completedLessons: [],
@@ -305,9 +254,9 @@ router.post('/complete-lesson', authenticateUser, async (req, res) => {
 
         const dateKey = getDateKey(timezoneOffsetMinutes);
 
-        // ---- Record the completion (or update if repeated) ----
         const existing = await LessonCompletion.findOne({
             userId: req.userId,
+            ...profileScope,
             language,
             levelId: safeLevel,
             lessonId
@@ -324,6 +273,7 @@ router.post('/complete-lesson', authenticateUser, async (req, res) => {
         } else {
             await LessonCompletion.create({
                 userId: req.userId,
+                ...profileScope,
                 language,
                 levelId: safeLevel,
                 lessonId,
@@ -335,9 +285,6 @@ router.post('/complete-lesson', authenticateUser, async (req, res) => {
             });
         }
 
-        /* ============================================
-           STREAK (only on first completion of the day)
-           ============================================ */
         const isFirstLessonToday = progress.lastCompletedDate !== dateKey;
         let streakChanged = false;
 
@@ -350,28 +297,20 @@ router.post('/complete-lesson', authenticateUser, async (req, res) => {
             } else {
                 progress.streak = 1;
             }
-
             progress.lastCompletedDate = dateKey;
             streakChanged = true;
-
             if (progress.streak > progress.longestStreak) {
                 progress.longestStreak = progress.streak;
             }
         }
 
-        /* ============================================
-           XP + LESSON TRACKING
-           ============================================ */
         if (isFirstTime) {
             progress.totalXP += xpEarned;
             progress.weeklyXP = (progress.weeklyXP || 0) + xpEarned;
-
             if (!progress.completedLessons.includes(lessonId)) {
                 progress.completedLessons.push(lessonId);
             }
-
             if (perfect) progress.perfectScores = (progress.perfectScores || 0) + 1;
-
             if (isFirstLessonToday) {
                 progress.dailyCompleted = 1;
                 progress.dailyDateKey = dateKey;
@@ -380,14 +319,12 @@ router.post('/complete-lesson', authenticateUser, async (req, res) => {
             }
         }
 
-        /* ============================================
-           LEVEL COMPLETION
-           ============================================ */
         let levelCompleted = false;
 
         if (!progress.completedLevels.includes(safeLevel)) {
             const completedInLevel = await LessonCompletion.countDocuments({
                 userId: req.userId,
+                ...profileScope,
                 language,
                 levelId: safeLevel,
                 lessonId: { $in: foundLesson.levelLessonIds }
@@ -403,6 +340,7 @@ router.post('/complete-lesson', authenticateUser, async (req, res) => {
 
                 await Notification.create({
                     userId: req.userId,
+                    profileId: req.profileId || null,
                     type: 'level_completed',
                     content: `🎉 Level ${safeLevel} complete in ${language}! +${levelBonus} XP`
                 });
@@ -414,12 +352,10 @@ router.post('/complete-lesson', authenticateUser, async (req, res) => {
         progress.lastCompletedLessonAt = new Date();
         await progress.save();
 
-        /* ============================================
-           REFERRAL QUALIFICATION (first-ever lesson)
-           ============================================ */
         if (isFirstTime && progress.completedLessons.length === 1) {
             const anyOtherProgress = await Progress.findOne({
                 userId: req.userId,
+                ...profileScope,
                 language: { $ne: language },
                 'completedLessons.0': { $exists: true }
             });
@@ -429,27 +365,24 @@ router.post('/complete-lesson', authenticateUser, async (req, res) => {
             }
         }
 
-        /* ============================================
-           WEEKLY FREEZE BONUS
-           ============================================ */
         let freezeBonus = { granted: false };
         if (streakChanged) {
             freezeBonus = await grantWeeklyFreezeIfEligible(
                 req.userId,
+                req.profileId || null,
                 language,
                 progress.streak
             );
         }
 
-        /* ============================================
-           POD WEEKLY XP UPDATE
-           ============================================ */
         if (isFirstTime && xpEarned > 0) {
-            const pods = await Pod.find({
+            const podQuery = {
                 'members.userId': req.userId,
                 language,
                 isActive: true
-            });
+            };
+            if (req.profileId) podQuery['members.profileId'] = req.profileId;
+            const pods = await Pod.find(podQuery);
             for (const pod of pods) {
                 pod.weeklyXP = (pod.weeklyXP || 0) + xpEarned;
                 pod.totalXP = (pod.totalXP || 0) + xpEarned;
@@ -457,9 +390,6 @@ router.post('/complete-lesson', authenticateUser, async (req, res) => {
             }
         }
 
-        /* ============================================
-           RESPONSE
-           ============================================ */
         res.status(201).json({
             success: true,
             completion: {
@@ -492,10 +422,8 @@ router.post('/complete-lesson', authenticateUser, async (req, res) => {
 
 /* ============================================================
    POST /api/progress/sync
-   Legacy full sync. Used by onboarding to seed the placement
-   level for a fresh language.
    ============================================================ */
-router.post('/sync', authenticateUser, async (req, res) => {
+router.post('/sync', authenticateUser, resolveProfile, async (req, res) => {
     const {
         language,
         completedLevels,
@@ -516,7 +444,7 @@ router.post('/sync', authenticateUser, async (req, res) => {
 
     try {
         const progress = await Progress.findOneAndUpdate(
-            { userId: req.userId, language },
+            { userId: req.userId, profileId: req.profileId || null, language },
             {
                 completedLevels: completedLevels || [],
                 completedLessons: completedLessons || [],
@@ -544,17 +472,18 @@ router.post('/sync', authenticateUser, async (req, res) => {
 
 /* ============================================================
    DELETE /api/progress/:language
-   Reset a language's progress.
    ============================================================ */
-router.delete('/:language', authenticateUser, async (req, res) => {
+router.delete('/:language', authenticateUser, resolveProfile, async (req, res) => {
     const { language } = req.params;
+    const profileScope = { profileId: req.profileId || null };
 
     try {
-        await Progress.findOneAndDelete({ userId: req.userId, language });
-        await LessonCompletion.deleteMany({ userId: req.userId, language });
+        await Progress.findOneAndDelete({ userId: req.userId, ...profileScope, language });
+        await LessonCompletion.deleteMany({ userId: req.userId, ...profileScope, language });
 
         const progress = await Progress.create({
             userId: req.userId,
+            ...profileScope,
             language,
             completedLevels: [],
             completedLessons: [],

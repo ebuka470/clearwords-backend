@@ -30,6 +30,9 @@ const VALID_GOALS = [
     'visit_nigeria'
 ];
 
+// Values of `learningFor` that imply the user intends to set up family profiles.
+const FAMILY_LEARNING_FOR = new Set(['child', 'family', 'both']);
+
 // How a self-reported placement level maps to a starting curriculum level.
 // "zero"/"few_words" start at 1, comfortable learners start at 20.
 const STARTING_LEVEL_BY_PLACEMENT = {
@@ -86,9 +89,35 @@ function publicUser(user) {
         podsJoined: user.podsJoined || 0,
         activePairs: user.activePairs || 0,
         cardsShared: user.cardsShared || 0,
+
+        // ---- Family accounts ----
+        familyProfiles: (user.familyProfiles || []).map(p => ({
+            _id: p._id,
+            name: p.name,
+            emoji: p.emoji,
+            color: p.color,
+            language: p.language,
+            role: p.role,
+            createdAt: p.createdAt
+        })),
+        activeProfileId: user.activeProfileId || null,
+        familyIntent: !!user.familyIntent,
+        familyPromptDismissedAt: user.familyPromptDismissedAt || null,
+
         createdAt: user.createdAt,
         lastActive: user.lastActive
     };
+}
+
+/**
+ * Derive familyIntent from what the user told us during onboarding.
+ * The onboarding flow no longer sends `accountType`; it sends `learningFor`.
+ * Legacy clients may still send `accountType: 'family'`.
+ */
+function deriveFamilyIntent(accountType, learningFor) {
+    if (accountType === 'family') return true;
+    if (FAMILY_LEARNING_FOR.has(learningFor)) return true;
+    return false;
 }
 
 // ============================================
@@ -148,6 +177,9 @@ router.post('/signup', async (req, res) => {
 
     const startingLevel = STARTING_LEVEL_BY_PLACEMENT[resolvedPlacement] || 1;
 
+    // ---- Family intent (derived, not charged, not created here) ----
+    const familyIntent = deriveFamilyIntent(resolvedAccountType, resolvedLearningFor);
+
     try {
         const existing = await User.findOne({ email: normalizedEmail });
         if (existing) {
@@ -166,11 +198,14 @@ router.post('/signup', async (req, res) => {
             accountType: resolvedAccountType,
             learningFor: resolvedLearningFor,
             goals: resolvedGoals,
-            placementLevel: resolvedPlacement
+            placementLevel: resolvedPlacement,
+            familyIntent
         });
 
+        // Initial personal progress — profileId is null for personal accounts.
         await Progress.create({
             userId: user._id,
+            profileId: null,
             language: resolvedLanguage,
             completedLevels: [],
             completedLessons: [],
@@ -192,6 +227,7 @@ router.post('/signup', async (req, res) => {
                     if (!existingReferral) {
                         await Referral.create({
                             referrerId: referrer._id,
+                            referrerProfileId: referrer.activeProfileId || null,
                             referrerCode: referrer.referralCode,
                             referredUserId: user._id,
                             referredEmail: user.email,
@@ -207,6 +243,7 @@ router.post('/signup', async (req, res) => {
 
                         await Notification.create({
                             userId: referrer._id,
+                            profileId: referrer.activeProfileId || null,
                             type: 'referral_signup',
                             sourceId: user._id,
                             sourceUsername: user.username || 'User',
@@ -426,6 +463,7 @@ if (process.env.NODE_ENV !== 'production') {
 
                 await Progress.create({
                     userId: user._id,
+                    profileId: null,
                     language: user.language || 'yoruba',
                     completedLevels: [],
                     completedLessons: [],

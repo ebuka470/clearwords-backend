@@ -7,6 +7,7 @@ const StreakFreezeSchema = new mongoose.Schema({
         required: true,
         index: true
     },
+    profileId: { type: mongoose.Schema.Types.ObjectId, default: null, index: true },
     language: { type: String, required: true },
 
     // Inventory: how many freezes the user currently holds
@@ -33,7 +34,7 @@ const StreakFreezeSchema = new mongoose.Schema({
     updatedAt: { type: Date, default: Date.now }
 });
 
-StreakFreezeSchema.index({ userId: 1, language: 1 }, { unique: true });
+StreakFreezeSchema.index({ userId: 1, profileId: 1, language: 1 }, { unique: true });
 
 StreakFreezeSchema.pre('save', function (next) {
     this.updatedAt = new Date();

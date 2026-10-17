@@ -2,26 +2,19 @@ import mongoose from 'mongoose';
 
 const ReferralSchema = new mongoose.Schema(
     {
-        // ============================================
-        // REFERRER
-        // ============================================
-
         referrerId: {
             type: mongoose.Schema.Types.ObjectId,
             ref: 'User',
             required: true,
             index: true
         },
+        profileId: { type: mongoose.Schema.Types.ObjectId, default: null, index: true },
 
         referrerCode: {
             type: String,
             required: true,
             index: true
         },
-
-        // ============================================
-        // REFERRED USER
-        // ============================================
 
         referredUserId: {
             type: mongoose.Schema.Types.ObjectId,
@@ -37,10 +30,6 @@ const ReferralSchema = new mongoose.Schema(
             trim: true
         },
 
-        // ============================================
-        // LIFECYCLE
-        // ============================================
-
         signedUpAt: {
             type: Date,
             default: Date.now
@@ -55,10 +44,6 @@ const ReferralSchema = new mongoose.Schema(
             type: Date,
             default: null
         },
-
-        // ============================================
-        // STATUS
-        // ============================================
 
         status: {
             type: String,
@@ -76,18 +61,10 @@ const ReferralSchema = new mongoose.Schema(
             default: null
         },
 
-        // ============================================
-        // REWARD
-        // ============================================
-
         rewardDays: {
             type: Number,
             default: 0
         },
-
-        // ============================================
-        // DATES
-        // ============================================
 
         createdAt: {
             type: Date,
@@ -101,10 +78,6 @@ const ReferralSchema = new mongoose.Schema(
     }
 );
 
-// ============================================
-// INDEXES
-// ============================================
-
 ReferralSchema.index({
     referrerId: 1,
     status: 1
@@ -114,10 +87,6 @@ ReferralSchema.index({
     referrerId: 1,
     completedFirstLessonAt: -1
 });
-
-// ============================================
-// PRE-SAVE
-// ============================================
 
 ReferralSchema.pre('save', function (next) {
     this.updatedAt = new Date();

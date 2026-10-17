@@ -14,6 +14,8 @@ const PodSchema = new mongoose.Schema({
 
     members: [{
         userId: { type: mongoose.Schema.Types.ObjectId, ref: 'User', required: true },
+        familyId: { type: mongoose.Schema.Types.ObjectId, default: null },
+        profileId: { type: mongoose.Schema.Types.ObjectId, default: null },
         joinedAt: { type: Date, default: Date.now },
         role: { type: String, enum: ['member', 'leader'], default: 'member' }
     }],
@@ -41,6 +43,7 @@ const PodSchema = new mongoose.Schema({
 
 PodSchema.index({ language: 1, level: 1, isActive: 1 });
 PodSchema.index({ 'members.userId': 1 });
+PodSchema.index({ 'members.familyId': 1 });
 
 PodSchema.pre('save', function (next) {
     if (!this.inviteCode) {

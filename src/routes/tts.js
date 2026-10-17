@@ -3,7 +3,8 @@ import axios from 'axios';
 import User from '../models/User.js';
 import UsageCounter from '../models/UsageCounter.js';
 import { authenticateUser } from '../middleware/auth.js';
-import { TTS_LIMITS } from '../middleware/tierGate.js';
+import { resolveProfile } from '../middleware/profile.js';
+import { TTS_LIMITS, CHAT_LIMITS, getUserLimits } from '../middleware/tierGate.js';
 
 const router = express.Router();
 
@@ -16,9 +17,9 @@ function getDateKey(timezoneOffsetMinutes) {
     return now.toISOString().slice(0, 10);
 }
 
-async function enforceDailyLimit(user, key, limit, dateKey) {
+async function enforceDailyLimit(userId, profileId, key, limit, dateKey) {
     if (limit === Infinity) return { ok: true };
-    const used = await UsageCounter.getCount(user._id, key, dateKey);
+    const used = await UsageCounter.getCount(userId, profileId || null, key, dateKey);
     if (used >= limit) {
         return {
             ok: false,
@@ -38,17 +39,16 @@ async function enforceDailyLimit(user, key, limit, dateKey) {
     return { ok: true };
 }
 
-async function recordUsage(user, key, limit, dateKey) {
+async function recordUsage(userId, profileId, key, limit, dateKey) {
     if (limit === Infinity) return { unlimited: true };
-    const doc = await UsageCounter.increment(user._id, key, dateKey);
+    const doc = await UsageCounter.increment(userId, profileId || null, key, dateKey);
     return { used: doc.count, limit, remaining: Math.max(0, limit - doc.count), dateKey };
 }
 
 // ============================================
 // POST /tts
-// TTS proxy (bypasses CORS) — authenticated + tier-gated
 // ============================================
-router.post('/tts', authenticateUser, async (req, res) => {
+router.post('/tts', authenticateUser, resolveProfile, async (req, res) => {
     try {
         const {
             text, voice, speaker, response_format,
@@ -75,7 +75,7 @@ router.post('/tts', authenticateUser, async (req, res) => {
         const limit = TTS_LIMITS[user.subscriptionTier] ?? TTS_LIMITS.free;
         const dateKey = getDateKey(timezoneOffsetMinutes);
 
-        const gate = await enforceDailyLimit(user, 'tts_generate', limit, dateKey);
+        const gate = await enforceDailyLimit(req.userId, req.profileId, 'tts_generate', limit, dateKey);
         if (!gate.ok) return res.status(gate.response.status).json(gate.response.body);
 
         const requestBody = {
@@ -107,7 +107,7 @@ router.post('/tts', authenticateUser, async (req, res) => {
         }
 
         const audioBuffer = await response.arrayBuffer();
-        const usage = await recordUsage(user, 'tts_generate', limit, dateKey);
+        const usage = await recordUsage(req.userId, req.profileId, 'tts_generate', limit, dateKey);
 
         const contentType = response_format === 'wav' ? 'audio/wav'
             : response_format === 'flac' ? 'audio/flac'
@@ -148,13 +148,12 @@ router.get('/tts/credits', async (req, res) => {
 // ============================================
 // GET /tts/usage
 // ============================================
-router.get('/usage', authenticateUser, async (req, res) => {
+router.get('/usage', authenticateUser, resolveProfile, async (req, res) => {
     try {
         const user = await User.findById(req.userId);
         if (!user) return res.status(404).json({ error: 'User not found' });
 
         const limits = getUserLimits(user);
-        // Parse safely — undefined / NaN / non-numeric all fall back to UTC
         const parsedTz = parseInt(req.query.timezoneOffsetMinutes);
         const dateKey = getDateKey(Number.isFinite(parsedTz) ? parsedTz : undefined);
 
@@ -162,8 +161,8 @@ router.get('/usage', authenticateUser, async (req, res) => {
         const customLimit = limits.customLessonsPerDay;
 
         const [chatUsed, customUsed] = await Promise.all([
-            UsageCounter.getCount(user._id, 'ai_chat_message', dateKey),
-            UsageCounter.getCount(user._id, 'ai_custom_lesson', dateKey)
+            UsageCounter.getCount(req.userId, req.profileId || null, 'ai_chat_message', dateKey),
+            UsageCounter.getCount(req.userId, req.profileId || null, 'ai_custom_lesson', dateKey)
         ]);
 
         res.json({

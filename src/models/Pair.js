@@ -5,8 +5,12 @@ const PairSchema = new mongoose.Schema({
     userA: { type: mongoose.Schema.Types.ObjectId, ref: 'User', required: true, index: true },
     userB: { type: mongoose.Schema.Types.ObjectId, ref: 'User', required: true, index: true },
 
-    languageA: { type: String, required: true },  // what userA is learning / userB teaches
-    languageB: { type: String, required: true },  // what userB is learning / userA teaches
+    // Family profile scoping (null for personal accounts)
+    profileIdA: { type: mongoose.Schema.Types.ObjectId, default: null, index: true },
+    profileIdB: { type: mongoose.Schema.Types.ObjectId, default: null, index: true },
+
+    languageA: { type: String, required: true },
+    languageB: { type: String, required: true },
 
     status: {
         type: String,
@@ -19,10 +23,11 @@ const PairSchema = new mongoose.Schema({
     endedAt: { type: Date, default: null },
     endedBy: { type: mongoose.Schema.Types.ObjectId, ref: 'User', default: null },
     endReason: {
-    type: String,
-    enum: ['manual', 'report', 'inactive', 'auto', null],
-    default: null
-},
+        type: String,
+        enum: ['manual', 'report', 'inactive', 'auto', 'profile_removed', null],
+        default: null
+    },
+
     // Feature flags per tier
     voiceEnabled: { type: Boolean, default: false },
     videoEnabled: { type: Boolean, default: false },

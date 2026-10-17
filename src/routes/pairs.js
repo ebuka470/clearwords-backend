@@ -6,6 +6,7 @@ import User from '../models/User.js';
 import Notification from '../models/Notification.js';
 import { sendPushToUser } from '../services/pushService.js';
 import { authenticateUser } from '../middleware/auth.js';
+import { resolveProfile } from '../middleware/profile.js';
 import { moderationMiddleware } from '../middleware/moderation.js';
 import { canCreatePair, getUserLimits } from '../middleware/tierGate.js';
 
@@ -13,9 +14,6 @@ const router = express.Router();
 
 /* ============================================================
    VOICE / VIDEO SLOT COUNTING
-   Lives here (not in tierGate.js) so that the tier middleware has
-   no runtime dependency on Pair — eliminates any chance of a
-   circular import between Pair.js and tierGate.js.
    ============================================================ */
 
 async function countVoicePairs(user) {
@@ -46,8 +44,27 @@ function extractId(u) {
 }
 
 /**
- * Shape a Pair document for the frontend.
+ * Build a profile-scoped query fragment for the viewer.
+ * If a profileId is provided, the pair must belong to that profile
+ * on the viewer's side. Otherwise only profileId-null (personal) rows.
  */
+function viewerScope(req) {
+    if (req.profileId) {
+        return {
+            $or: [
+                { userA: req.userId, profileIdA: req.profileId },
+                { userB: req.userId, profileIdB: req.profileId }
+            ]
+        };
+    }
+    return {
+        $or: [
+            { userA: req.userId, profileIdA: null },
+            { userB: req.userId, profileIdB: null }
+        ]
+    };
+}
+
 function shapePair(pair, viewerId) {
     const obj = pair.toObject ? pair.toObject() : pair;
     const viewer = String(viewerId);
@@ -70,16 +87,6 @@ function shapePair(pair, viewerId) {
     return obj;
 }
 
-/**
- * Compute effective voice/video flags for a pair.
- *
- * Both users must have the tier entitlement AND the requesting user
- * must have an available slot in their voice/video partner cap.
- *
- * Free: no voice, no video.
- * Premium: voice on up to 5 pairs.
- * Immersive: voice + video on unlimited pairs.
- */
 async function computePairFlags(userA, userB, enableVoice = true, enableVideo = true) {
     const a = getUserLimits(userA);
     const b = getUserLimits(userB);
@@ -87,7 +94,6 @@ async function computePairFlags(userA, userB, enableVoice = true, enableVideo = 
     let voiceEnabled = false;
     let videoEnabled = false;
 
-    // ---- Voice ----
     if (enableVoice && a.voice && b.voice) {
         if (a.voicePairs === Infinity) {
             voiceEnabled = true;
@@ -97,7 +103,6 @@ async function computePairFlags(userA, userB, enableVoice = true, enableVideo = 
         }
     }
 
-    // ---- Video ----
     if (enableVideo && a.video && b.video) {
         if (a.videoPairs === Infinity) {
             videoEnabled = true;
@@ -110,12 +115,6 @@ async function computePairFlags(userA, userB, enableVoice = true, enableVideo = 
     return { voiceEnabled, videoEnabled };
 }
 
-/**
- * Live call access for the VIEWER of a pair, mirroring POST /:pairId/call/start.
- * The stored pair.voiceEnabled/videoEnabled flags are only set when a pair is
- * accepted, so they go stale after a tier upgrade. This recomputes from the
- * current tiers of both users and says WHY a call is blocked.
- */
 async function liveCallAccess(pair, viewer, partner) {
     const v = getUserLimits(viewer);
     const p = getUserLimits(partner);
@@ -138,13 +137,31 @@ async function liveCallAccess(pair, viewer, partner) {
     };
 }
 
+/**
+ * True if the requesting user+profile is one of the two sides of this pair.
+ */
+function isPairMember(pair, req) {
+    const uid = String(req.userId);
+    const pid = req.profileId ? String(req.profileId) : null;
+
+    if (String(pair.userA) === uid) {
+        const pairPid = pair.profileIdA ? String(pair.profileIdA) : null;
+        return pid === pairPid;
+    }
+    if (String(pair.userB) === uid) {
+        const pairPid = pair.profileIdB ? String(pair.profileIdB) : null;
+        return pid === pairPid;
+    }
+    return false;
+}
+
 /* ============================================================
    GET /api/pairs
    ============================================================ */
-router.get('/', authenticateUser, async (req, res) => {
+router.get('/', authenticateUser, resolveProfile, async (req, res) => {
     try {
         const pairs = await Pair.find({
-            $or: [{ userA: req.userId }, { userB: req.userId }],
+            ...viewerScope(req),
             status: { $in: ['pending', 'active'] }
         })
         .populate('userA', 'fullName username avatarUrl learningLanguages teachingLanguages language')
@@ -185,7 +202,7 @@ router.get('/', authenticateUser, async (req, res) => {
    POST /api/pairs/request
    Unlimited text pairs. Voice/video gated by tier + slots.
    ============================================================ */
-router.post('/request', authenticateUser, async (req, res) => {
+router.post('/request', authenticateUser, resolveProfile, async (req, res) => {
     const { targetUserId, userId, languageA, languageB, message } = req.body;
 
     let resolvedTargetId = targetUserId || userId;
@@ -215,13 +232,23 @@ router.post('/request', authenticateUser, async (req, res) => {
         if (!target) return res.status(404).json({ error: 'Target user not found' });
         if (target.isBanned) return res.status(403).json({ error: 'Target user is unavailable' });
 
-        const existing = await Pair.findOne({
+        // Duplicate check, scoped to the viewer's current profile.
+        const existingQuery = {
             status: { $in: ['pending', 'active'] },
             $or: [
-                { userA: req.userId, userB: resolvedTargetId },
-                { userA: resolvedTargetId, userB: req.userId }
+                {
+                    userA: req.userId,
+                    profileIdA: req.profileId || null,
+                    userB: resolvedTargetId
+                },
+                {
+                    userA: resolvedTargetId,
+                    userB: req.userId,
+                    profileIdB: req.profileId || null
+                }
             ]
-        });
+        };
+        const existing = await Pair.findOne(existingQuery);
         if (existing) return res.status(400).json({ error: 'Pair already exists' });
 
         let finalA = languageA;
@@ -251,6 +278,8 @@ router.post('/request', authenticateUser, async (req, res) => {
         const pair = await Pair.create({
             userA: req.userId,
             userB: resolvedTargetId,
+            profileIdA: req.profileId || null,
+            profileIdB: null,
             languageA: finalA,
             languageB: finalB,
             status: 'pending',
@@ -259,6 +288,7 @@ router.post('/request', authenticateUser, async (req, res) => {
 
         await Notification.create({
             userId: resolvedTargetId,
+            profileId: target.activeProfileId || null,
             type: 'pair_matched',
             sourceId: user._id,
             sourceUsername: user.username || 'User',
@@ -276,9 +306,8 @@ router.post('/request', authenticateUser, async (req, res) => {
 
 /* ============================================================
    POST /api/pairs/match
-   Auto-match. Unlimited text pairs.
    ============================================================ */
-router.post('/match', authenticateUser, async (req, res) => {
+router.post('/match', authenticateUser, resolveProfile, async (req, res) => {
     const { languageLearning, languageTeaching, timezoneOffsetMinutes } = req.body || {};
 
     try {
@@ -307,9 +336,10 @@ router.post('/match', authenticateUser, async (req, res) => {
             });
         }
 
+        // Only exclude the current profile's existing pairs
         const existingPairs = await Pair.find({
             status: { $in: ['pending', 'active'] },
-            $or: [{ userA: me._id }, { userB: me._id }]
+            ...viewerScope(req)
         }).select('userA userB');
 
         const alreadyPairedWith = new Set();
@@ -394,6 +424,8 @@ router.post('/match', authenticateUser, async (req, res) => {
         const pair = await Pair.create({
             userA: me._id,
             userB: target._id,
+            profileIdA: req.profileId || null,
+            profileIdB: null,
             languageA,
             languageB,
             status: 'active',
@@ -408,6 +440,7 @@ router.post('/match', authenticateUser, async (req, res) => {
         await Notification.insertMany([
             {
                 userId: target._id,
+                profileId: target.activeProfileId || null,
                 type: 'pair_matched',
                 sourceId: me._id,
                 sourceUsername: me.username || 'User',
@@ -417,6 +450,7 @@ router.post('/match', authenticateUser, async (req, res) => {
             },
             {
                 userId: me._id,
+                profileId: req.profileId || null,
                 type: 'pair_matched',
                 sourceId: target._id,
                 sourceUsername: target.username || 'User',
@@ -447,19 +481,29 @@ router.post('/match', authenticateUser, async (req, res) => {
 /* ============================================================
    POST /api/pairs/:pairId/accept
    ============================================================ */
-router.post('/:pairId/accept', authenticateUser, async (req, res) => {
+router.post('/:pairId/accept', authenticateUser, resolveProfile, async (req, res) => {
     const { pairId } = req.params;
 
     try {
         const pair = await Pair.findById(pairId);
         if (!pair) return res.status(404).json({ error: 'Pair not found' });
 
-        if (pair.userB.toString() !== req.userId && pair.userA.toString() !== req.userId) {
+        if (!isPairMember(pair, req)) {
             return res.status(403).json({ error: 'Not part of this pair' });
         }
 
         if (pair.status !== 'pending') {
             return res.status(400).json({ error: 'Pair is not pending' });
+        }
+
+        // If the accepting user has a profile, tag it on their side.
+        if (req.profileId) {
+            if (String(pair.userA) === String(req.userId) && !pair.profileIdA) {
+                pair.profileIdA = req.profileId;
+            }
+            if (String(pair.userB) === String(req.userId) && !pair.profileIdB) {
+                pair.profileIdB = req.profileId;
+            }
         }
 
         const userA = await User.findById(pair.userA);
@@ -486,8 +530,10 @@ router.post('/:pairId/accept', authenticateUser, async (req, res) => {
 
 /* ============================================================
    DELETE /api/pairs/:pairId
+   Accepts reason: 'manual' | 'report' | 'profile_removed'
+   (profile_removed is set by the profiles cascade-delete path.)
    ============================================================ */
-router.delete('/:pairId', authenticateUser, async (req, res) => {
+router.delete('/:pairId', authenticateUser, resolveProfile, async (req, res) => {
     const { pairId } = req.params;
     const { reason } = req.body || {};
 
@@ -495,25 +541,40 @@ router.delete('/:pairId', authenticateUser, async (req, res) => {
         const pair = await Pair.findById(pairId);
         if (!pair) return res.status(404).json({ error: 'Pair not found' });
 
-        if (pair.userA.toString() !== req.userId && pair.userB.toString() !== req.userId) {
+        if (!isPairMember(pair, req)) {
             return res.status(403).json({ error: 'Not part of this pair' });
         }
+
+        const allowedReasons = new Set(['manual', 'report', 'profile_removed']);
+        const endReason = allowedReasons.has(reason)
+            ? reason
+            : (reason === 'report' ? 'report' : 'manual');
 
         pair.status = 'ended';
         pair.endedAt = new Date();
         pair.endedBy = req.userId;
-        pair.endReason = reason === 'report' ? 'report' : 'manual';
+        pair.endReason = endReason;
         await pair.save();
 
         await User.findByIdAndUpdate(pair.userA, { $inc: { activePairs: -1 } });
         await User.findByIdAndUpdate(pair.userB, { $inc: { activePairs: -1 } });
 
-        const otherUserId = pair.userA.toString() === req.userId ? pair.userB : pair.userA;
+        // Notify the other side
+        const isUserA = String(pair.userA) === String(req.userId);
+        const otherUserId = isUserA ? pair.userB : pair.userA;
+        const otherProfileId = isUserA ? pair.profileIdB : pair.profileIdA;
+
+        const otherUser = await User.findById(otherUserId).select('activeProfileId');
+        const notifyProfileId = otherProfileId || otherUser?.activeProfileId || null;
+
         await Notification.create({
             userId: otherUserId,
+            profileId: notifyProfileId,
             type: 'pair_ended',
             pairId: pair._id,
-            content: 'Your language exchange pair has ended'
+            content: endReason === 'profile_removed'
+                ? 'Your language exchange pair has ended because the other profile was removed.'
+                : 'Your language exchange pair has ended'
         });
 
         res.json({ success: true });
@@ -526,7 +587,7 @@ router.delete('/:pairId', authenticateUser, async (req, res) => {
 /* ============================================================
    GET /api/pairs/:pairId/messages
    ============================================================ */
-router.get('/:pairId/messages', authenticateUser, async (req, res) => {
+router.get('/:pairId/messages', authenticateUser, resolveProfile, async (req, res) => {
     const { pairId } = req.params;
     const page = parseInt(req.query.page) || 1;
     const limit = parseInt(req.query.limit) || 50;
@@ -535,7 +596,7 @@ router.get('/:pairId/messages', authenticateUser, async (req, res) => {
         const pair = await Pair.findById(pairId);
         if (!pair) return res.status(404).json({ error: 'Pair not found' });
 
-        if (pair.userA.toString() !== req.userId && pair.userB.toString() !== req.userId) {
+        if (!isPairMember(pair, req)) {
             return res.status(403).json({ error: 'Not part of this pair' });
         }
 
@@ -572,14 +633,14 @@ router.get('/:pairId/messages', authenticateUser, async (req, res) => {
 /* ============================================================
    POST /api/pairs/:pairId/read
    ============================================================ */
-router.post('/:pairId/read', authenticateUser, async (req, res) => {
+router.post('/:pairId/read', authenticateUser, resolveProfile, async (req, res) => {
     const { pairId } = req.params;
 
     try {
         const pair = await Pair.findById(pairId);
         if (!pair) return res.status(404).json({ error: 'Pair not found' });
 
-        if (pair.userA.toString() !== req.userId && pair.userB.toString() !== req.userId) {
+        if (!isPairMember(pair, req)) {
             return res.status(403).json({ error: 'Not part of this pair' });
         }
 
@@ -596,11 +657,10 @@ router.post('/:pairId/read', authenticateUser, async (req, res) => {
     }
 });
 
-
 /* ============================================================
    POST /api/pairs/:pairId/messages
    ============================================================ */
-router.post('/:pairId/messages', authenticateUser, moderationMiddleware, async (req, res) => {
+router.post('/:pairId/messages', authenticateUser, resolveProfile, moderationMiddleware, async (req, res) => {
     const { pairId } = req.params;
     const { text, content } = req.body;
 
@@ -617,12 +677,13 @@ router.post('/:pairId/messages', authenticateUser, moderationMiddleware, async (
             return res.status(400).json({ error: 'Pair is not active' });
         }
 
-        if (pair.userA.toString() !== req.userId && pair.userB.toString() !== req.userId) {
+        if (!isPairMember(pair, req)) {
             return res.status(403).json({ error: 'Not part of this pair' });
         }
 
         const message = await PairMessage.create({
             pairId,
+            profileId: req.profileId || null,
             senderId: req.userId,
             text: messageText
         });
@@ -630,18 +691,18 @@ router.post('/:pairId/messages', authenticateUser, moderationMiddleware, async (
         pair.lastActivityAt = new Date();
         await pair.save();
 
-            // Push the other side of the pair
-    const partnerId = pair.userA.toString() === req.userId ? pair.userB : pair.userA;
-    const sender = await User.findById(req.userId).select('fullName username');
-    const displayName = sender?.fullName || sender?.username || 'Your partner';
+        const isUserA = String(pair.userA) === String(req.userId);
+        const partnerId = isUserA ? pair.userB : pair.userA;
+        const sender = await User.findById(req.userId).select('fullName username');
+        const displayName = sender?.fullName || sender?.username || 'Your partner';
 
-    sendPushToUser(partnerId.toString(), {
-      title: displayName,
-      body: messageText.slice(0, 80) + (messageText.length > 80 ? '…' : ''),
-      url: '/community.html',
-      tag: `pair-${pair._id}`,
-      data: { pairId: String(pair._id) }
-    }).catch(() => {});
+        sendPushToUser(partnerId.toString(), {
+            title: displayName,
+            body: messageText.slice(0, 80) + (messageText.length > 80 ? '…' : ''),
+            url: '/community.html',
+            tag: `pair-${pair._id}`,
+            data: { pairId: String(pair._id) }
+        }).catch(() => {});
 
         const obj = message.toObject();
         obj.isMine = true;
@@ -655,12 +716,8 @@ router.post('/:pairId/messages', authenticateUser, moderationMiddleware, async (
 
 /* ============================================================
    POST /api/pairs/:pairId/call/start
-   Session gate for voice/video calls.
-   Checks:
-     1. Both users' tier entitlement (voice: Premium+, video: Immersive)
-     2. The caller's voice/video slot cap
    ============================================================ */
-router.post('/:pairId/call/start', authenticateUser, async (req, res) => {
+router.post('/:pairId/call/start', authenticateUser, resolveProfile, async (req, res) => {
     const { pairId } = req.params;
     const { type } = req.body;
 
@@ -676,21 +733,21 @@ router.post('/:pairId/call/start', authenticateUser, async (req, res) => {
             return res.status(400).json({ error: 'Pair is not active' });
         }
 
-        if (pair.userA.toString() !== req.userId && pair.userB.toString() !== req.userId) {
+        if (!isPairMember(pair, req)) {
             return res.status(403).json({ error: 'Not part of this pair' });
         }
 
         const user = await User.findById(req.userId);
         if (!user) return res.status(404).json({ error: 'User not found' });
 
-        const partnerId = pair.userA.toString() === req.userId ? pair.userB : pair.userA;
+        const isUserA = String(pair.userA) === String(req.userId);
+        const partnerId = isUserA ? pair.userB : pair.userA;
         const partner = await User.findById(partnerId);
         if (!partner) return res.status(404).json({ error: 'Partner not found' });
 
         const userLimits = getUserLimits(user);
         const partnerLimits = getUserLimits(partner);
 
-        // ---------------- VOICE ----------------
         if (type === 'voice') {
             if (!userLimits.voice) {
                 return res.status(403).json({
@@ -720,7 +777,6 @@ router.post('/:pairId/call/start', authenticateUser, async (req, res) => {
             }
         }
 
-        // ---------------- VIDEO ----------------
         if (type === 'video') {
             if (!userLimits.video) {
                 return res.status(403).json({

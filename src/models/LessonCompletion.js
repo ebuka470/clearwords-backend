@@ -7,6 +7,7 @@ const LessonCompletionSchema = new mongoose.Schema({
         required: true,
         index: true
     },
+    profileId: { type: mongoose.Schema.Types.ObjectId, default: null, index: true },
     language: { type: String, required: true, index: true },
 
     levelId: { type: Number, required: true },
@@ -27,13 +28,13 @@ const LessonCompletionSchema = new mongoose.Schema({
     }
 });
 
-// One completion per user + language + level + lesson
+// One completion per user + profile + language + level + lesson
 LessonCompletionSchema.index(
-    { userId: 1, language: 1, levelId: 1, lessonId: 1 },
+    { userId: 1, profileId: 1, language: 1, levelId: 1, lessonId: 1 },
     { unique: true }
 );
 
-LessonCompletionSchema.index({ userId: 1, completedAt: -1 });
+LessonCompletionSchema.index({ userId: 1, profileId: 1, completedAt: -1 });
 
 const LessonCompletion = mongoose.model('LessonCompletion', LessonCompletionSchema);
 

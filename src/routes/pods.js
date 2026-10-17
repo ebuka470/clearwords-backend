@@ -7,6 +7,7 @@ import Progress from '../models/Progress.js';
 import Notification from '../models/Notification.js';
 import { sendPushToUser } from '../services/pushService.js';
 import { authenticateUser } from '../middleware/auth.js';
+import { resolveProfile } from '../middleware/profile.js';
 import { moderationMiddleware } from '../middleware/moderation.js';
 import { canJoinPod, getUserLimits } from '../middleware/tierGate.js';
 
@@ -16,10 +17,8 @@ const router = express.Router();
    HELPERS
    ============================================================ */
 
-/**
- * Map a numeric currentLevel (e.g. 3) or a tier string to a
- * Pod.level enum value. Pod.level is 'beginner' | 'intermediate' | 'advanced'.
- */
+const MAX_FAMILY_MEMBERS_PER_POD = 2;
+
 function normalizeLevel(l) {
     if (typeof l === 'string' && ['beginner', 'intermediate', 'advanced'].includes(l)) {
         return l;
@@ -31,9 +30,6 @@ function normalizeLevel(l) {
     return 'advanced';
 }
 
-/**
- * Add an `isMine` flag to a message document for the given viewer.
- */
 function shapeMessage(message, viewerId) {
     const obj = message.toObject ? message.toObject() : message;
     obj.isMine = !!(
@@ -43,19 +39,32 @@ function shapeMessage(message, viewerId) {
     return obj;
 }
 
+/**
+ * Check whether adding this user (with their family) would exceed
+ * the per-family cap in this pod.
+ */
+function wouldExceedFamilyCap(pod, userId) {
+    const existing = (pod.members || []).filter(
+        m => m.familyId && m.familyId.toString() === userId.toString()
+    ).length;
+    return existing >= MAX_FAMILY_MEMBERS_PER_POD;
+}
+
 /* ============================================================
    GET /api/pods
    ============================================================ */
-router.get('/', authenticateUser, async (req, res) => {
+router.get('/', authenticateUser, resolveProfile, async (req, res) => {
     try {
-        const pods = await Pod.find({
+        const match = {
             'members.userId': req.userId,
             isActive: true
-        })
-        .populate('members.userId', 'fullName username avatarUrl currentLevel totalXP weeklyXP lastActive')
-        .sort({ updatedAt: -1 });
+        };
+        if (req.profileId) match['members.profileId'] = req.profileId;
 
-        // Compute per-member weekly XP from check-ins in the last 7 days
+        const pods = await Pod.find(match)
+            .populate('members.userId', 'fullName username avatarUrl currentLevel totalXP weeklyXP lastActive')
+            .sort({ updatedAt: -1 });
+
         const startOfWeek = new Date();
         startOfWeek.setDate(startOfWeek.getDate() - startOfWeek.getDay());
         startOfWeek.setHours(0, 0, 0, 0);
@@ -63,7 +72,6 @@ router.get('/', authenticateUser, async (req, res) => {
         const shaped = await Promise.all(pods.map(async (pod) => {
             const obj = pod.toObject();
 
-            // Aggregate weekly check-in XP per author
             const weeklyAgg = await PodMessage.aggregate([
                 {
                     $match: {
@@ -84,26 +92,30 @@ router.get('/', authenticateUser, async (req, res) => {
                 weeklyAgg.map(w => [w._id.toString(), w.lessons || 0])
             );
 
-            // Level / XP / streak live in Progress (per language), not on User
             const memberIds = obj.members.map(m => (m.userId && m.userId._id) || m.userId);
-            const progressDocs = await Progress.find({ userId: { $in: memberIds }, language: pod.language })
-                .select('userId currentLevel totalXP streak').lean();
-            const progressMap = Object.fromEntries(progressDocs.map(pr => [String(pr.userId), pr]));
+            const progressDocs = await Progress.find({
+                userId: { $in: memberIds },
+                language: pod.language
+            }).select('userId profileId currentLevel totalXP streak').lean();
+            const progressMap = Object.fromEntries(
+                progressDocs.map(pr => [`${pr.userId}_${pr.profileId || 'null'}`, pr])
+            );
 
-            // Enrich each member with the display fields the frontend needs
             obj.members = obj.members.map(m => {
                 const u = m.userId || {};
+                const pKey = `${u._id}_${m.profileId || 'null'}`;
                 return {
                     userId: u._id || m.userId,
+                    profileId: m.profileId || null,
+                    familyId: m.familyId || null,
                     role: m.role,
                     joinedAt: m.joinedAt,
-                    // Flatten the fields the frontend reads
                     fullName: u.fullName || '',
                     username: u.username || '',
                     avatarUrl: u.avatarUrl || '',
-                    currentLevel: (progressMap[String(u._id)] || {}).currentLevel || 1,
-                    totalXP: (progressMap[String(u._id)] || {}).totalXP || 0,
-                    streak: (progressMap[String(u._id)] || {}).streak || 0,
+                    currentLevel: (progressMap[pKey] || {}).currentLevel || 1,
+                    totalXP: (progressMap[pKey] || {}).totalXP || 0,
+                    streak: (progressMap[pKey] || {}).streak || 0,
                     weeklyXP: weeklyMap[u._id?.toString()] || 0,
                     lastActive: u.lastActive || null
                 };
@@ -123,7 +135,7 @@ router.get('/', authenticateUser, async (req, res) => {
    POST /api/pods
    Create a pod (Premium / Immersive only)
    ============================================================ */
-router.post('/', authenticateUser, async (req, res) => {
+router.post('/', authenticateUser, resolveProfile, async (req, res) => {
     const { name, description, language, level, timezone } = req.body;
 
     if (!name || !language || !level) {
@@ -148,7 +160,12 @@ router.post('/', authenticateUser, async (req, res) => {
             level: normalizeLevel(level),
             timezone: timezone || 'Africa/Lagos',
             creatorId: user._id,
-            members: [{ userId: user._id, role: 'leader' }]
+            members: [{
+                userId: user._id,
+                familyId: user._id,
+                profileId: req.profileId || null,
+                role: 'leader'
+            }]
         });
 
         user.podsJoined = (user.podsJoined || 0) + 1;
@@ -163,11 +180,8 @@ router.post('/', authenticateUser, async (req, res) => {
 
 /* ============================================================
    POST /api/pods/match
-   Auto-match the current user into a pod.
-   Uses explicit read → modify → save + a verify step so we know
-   the membership write actually landed.
    ============================================================ */
-router.post('/match', authenticateUser, async (req, res) => {
+router.post('/match', authenticateUser, resolveProfile, async (req, res) => {
     let { language, level, timezone } = req.body || {};
 
     try {
@@ -176,7 +190,11 @@ router.post('/match', authenticateUser, async (req, res) => {
             language = u?.language || 'yoruba';
         }
         if (!level) {
-            const p = await Progress.findOne({ userId: req.userId, language });
+            const p = await Progress.findOne({
+                userId: req.userId,
+                profileId: req.profileId || null,
+                language
+            });
             level = p?.currentLevel || 1;
         }
         if (!language || !level) {
@@ -196,11 +214,13 @@ router.post('/match', authenticateUser, async (req, res) => {
             });
         }
 
-        const alreadyIn = await Pod.findOne({
+        const alreadyInQuery = {
             language,
             isActive: true,
             'members.userId': user._id
-        });
+        };
+        if (req.profileId) alreadyInQuery['members.profileId'] = req.profileId;
+        const alreadyIn = await Pod.findOne(alreadyInQuery);
         if (alreadyIn) {
             return res.json({ matched: false, pod: alreadyIn, reason: 'already_in_pod' });
         }
@@ -215,47 +235,36 @@ router.post('/match', authenticateUser, async (req, res) => {
         }).sort({ createdAt: 1 });
 
         if (candidatePod) {
-            const alreadyMember = candidatePod.members.some(
-                m => m.userId.toString() === user._id.toString()
-            );
-
-            if (!alreadyMember) {
-                candidatePod.members.push({ userId: user._id, role: 'member' });
+            if (wouldExceedFamilyCap(candidatePod, user._id)) {
+                // This family already has 2 members in this pod — try a fresh pod
+                // Fall through to create a new pod below
+            } else {
+                const memberPayload = {
+                    userId: user._id,
+                    familyId: user._id,
+                    profileId: req.profileId || null,
+                    role: 'member'
+                };
+                candidatePod.members.push(memberPayload);
                 await candidatePod.save();
-            }
 
-            // Verify the write actually landed
-            const verify = await Pod.findById(candidatePod._id).select('members');
-            const isMember = verify.members.some(
-                m => m.userId.toString() === user._id.toString()
-            );
+                user.podsJoined = (user.podsJoined || 0) + 1;
+                await user.save();
 
-            if (!isMember) {
-                console.warn('matchPod: $push did not persist, retrying with $addToSet', {
-                    podId: candidatePod._id.toString(),
-                    userId: user._id.toString()
+                await Notification.create({
+                    userId: user._id,
+                    profileId: req.profileId || null,
+                    type: 'pod_milestone',
+                    podId: candidatePod._id,
+                    content: `You were matched into "${candidatePod.name}"`
                 });
-                await Pod.updateOne(
-                    { _id: candidatePod._id },
-                    { $addToSet: { members: { userId: user._id, role: 'member' } } }
-                );
+
+                const finalPod = await Pod.findById(candidatePod._id);
+                return res.json({ matched: true, pod: finalPod, created: false });
             }
-
-            user.podsJoined = (user.podsJoined || 0) + 1;
-            await user.save();
-
-            await Notification.create({
-                userId: user._id,
-                type: 'pod_milestone',
-                podId: candidatePod._id,
-                content: `You were matched into "${candidatePod.name}"`
-            });
-
-            const finalPod = await Pod.findById(candidatePod._id);
-            return res.json({ matched: true, pod: finalPod, created: false });
         }
 
-        // No candidate — create a new pod
+        // Create a new pod
         const newPod = await Pod.create({
             name: `${language} ${normalizedLevel} pod`,
             description: 'Auto-generated pod',
@@ -264,7 +273,12 @@ router.post('/match', authenticateUser, async (req, res) => {
             timezone: timezone || 'Africa/Lagos',
             creatorId: user._id,
             isAutoMatched: true,
-            members: [{ userId: user._id, role: 'leader' }]
+            members: [{
+                userId: user._id,
+                familyId: user._id,
+                profileId: req.profileId || null,
+                role: 'leader'
+            }]
         });
 
         user.podsJoined = (user.podsJoined || 0) + 1;
@@ -280,7 +294,7 @@ router.post('/match', authenticateUser, async (req, res) => {
 /* ============================================================
    POST /api/pods/join-by-code
    ============================================================ */
-router.post('/join-by-code', authenticateUser, async (req, res) => {
+router.post('/join-by-code', authenticateUser, resolveProfile, async (req, res) => {
     const { inviteCode } = req.body || {};
 
     if (!inviteCode) {
@@ -299,13 +313,24 @@ router.post('/join-by-code', authenticateUser, async (req, res) => {
             return res.status(400).json({ error: 'Pod is full' });
         }
 
-        if (pod.members.some(m => m.userId.toString() === req.userId)) {
+        const alreadyMember = pod.members.some(
+            m => m.userId.toString() === req.userId &&
+                 (!req.profileId || String(m.profileId) === String(req.profileId))
+        );
+        if (alreadyMember) {
             return res.status(400).json({ error: 'Already a member' });
         }
 
         const user = await User.findById(req.userId);
         if (!user) return res.status(404).json({ error: 'User not found' });
         if (user.isBanned) return res.status(403).json({ error: 'Account is banned' });
+
+        // Family cap: max 2 per familyId
+        if (wouldExceedFamilyCap(pod, user._id)) {
+            return res.status(400).json({
+                error: `Only ${MAX_FAMILY_MEMBERS_PER_POD} family members can join the same pod`
+            });
+        }
 
         const recentLeave = (pod.formerMembers || []).find(
             fm => fm.userId && fm.userId.toString() === req.userId
@@ -334,7 +359,12 @@ router.post('/join-by-code', authenticateUser, async (req, res) => {
             });
         }
 
-        pod.members.push({ userId: user._id, role: 'member' });
+        pod.members.push({
+            userId: user._id,
+            familyId: user._id,
+            profileId: req.profileId || null,
+            role: 'member'
+        });
         pod.formerMembers = (pod.formerMembers || []).filter(
             fm => !fm.userId || fm.userId.toString() !== req.userId
         );
@@ -366,7 +396,7 @@ router.post('/join-by-code', authenticateUser, async (req, res) => {
 /* ============================================================
    POST /api/pods/:podId/join
    ============================================================ */
-router.post('/:podId/join', authenticateUser, async (req, res) => {
+router.post('/:podId/join', authenticateUser, resolveProfile, async (req, res) => {
     const { podId } = req.params;
     const { inviteCode } = req.body || {};
 
@@ -384,13 +414,23 @@ router.post('/:podId/join', authenticateUser, async (req, res) => {
             return res.status(400).json({ error: 'Pod is full' });
         }
 
-        if (pod.members.some(m => m.userId.toString() === req.userId)) {
+        const alreadyMember = pod.members.some(
+            m => m.userId.toString() === req.userId &&
+                 (!req.profileId || String(m.profileId) === String(req.profileId))
+        );
+        if (alreadyMember) {
             return res.status(400).json({ error: 'Already a member' });
         }
 
         const user = await User.findById(req.userId);
         if (!user) return res.status(404).json({ error: 'User not found' });
         if (user.isBanned) return res.status(403).json({ error: 'Account is banned' });
+
+        if (wouldExceedFamilyCap(pod, user._id)) {
+            return res.status(400).json({
+                error: `Only ${MAX_FAMILY_MEMBERS_PER_POD} family members can join the same pod`
+            });
+        }
 
         const recentLeave = (pod.formerMembers || []).find(
             fm => fm.userId && fm.userId.toString() === req.userId
@@ -419,7 +459,12 @@ router.post('/:podId/join', authenticateUser, async (req, res) => {
             });
         }
 
-        pod.members.push({ userId: user._id, role: 'member' });
+        pod.members.push({
+            userId: user._id,
+            familyId: user._id,
+            profileId: req.profileId || null,
+            role: 'member'
+        });
         pod.formerMembers = (pod.formerMembers || []).filter(
             fm => !fm.userId || fm.userId.toString() !== req.userId
         );
@@ -451,14 +496,18 @@ router.post('/:podId/join', authenticateUser, async (req, res) => {
 /* ============================================================
    DELETE /api/pods/:podId/leave
    ============================================================ */
-router.delete('/:podId/leave', authenticateUser, async (req, res) => {
+router.delete('/:podId/leave', authenticateUser, resolveProfile, async (req, res) => {
     const { podId } = req.params;
 
     try {
         const pod = await Pod.findById(podId);
         if (!pod) return res.status(404).json({ error: 'Pod not found' });
 
-        const isMember = pod.members.some(m => m.userId.toString() === req.userId);
+        const memberMatch = m =>
+            m.userId.toString() === req.userId &&
+            (!req.profileId || String(m.profileId) === String(req.profileId));
+
+        const isMember = pod.members.some(memberMatch);
         if (!isMember) {
             return res.status(400).json({ error: 'Not a member of this pod' });
         }
@@ -466,7 +515,7 @@ router.delete('/:podId/leave', authenticateUser, async (req, res) => {
         pod.formerMembers = pod.formerMembers || [];
         pod.formerMembers.push({ userId: req.userId, leftAt: new Date() });
 
-        pod.members = pod.members.filter(m => m.userId.toString() !== req.userId);
+        pod.members = pod.members.filter(m => !memberMatch(m));
 
         if (pod.members.length === 0) {
             pod.isActive = false;
@@ -485,9 +534,8 @@ router.delete('/:podId/leave', authenticateUser, async (req, res) => {
 
 /* ============================================================
    GET /api/pods/:podId/messages
-   Returns each message shaped with an `isMine` flag.
    ============================================================ */
-router.get('/:podId/messages', authenticateUser, async (req, res) => {
+router.get('/:podId/messages', authenticateUser, resolveProfile, async (req, res) => {
     const { podId } = req.params;
     const page = parseInt(req.query.page) || 1;
     const limit = parseInt(req.query.limit) || 50;
@@ -496,7 +544,11 @@ router.get('/:podId/messages', authenticateUser, async (req, res) => {
         const pod = await Pod.findById(podId);
         if (!pod) return res.status(404).json({ error: 'Pod not found' });
 
-        if (!pod.members.some(m => m.userId.toString() === req.userId)) {
+        const isMember = pod.members.some(
+            m => m.userId.toString() === req.userId &&
+                 (!req.profileId || !m.profileId || String(m.profileId) === String(req.profileId))
+        );
+        if (!isMember) {
             return res.status(403).json({ error: 'Not a member of this pod' });
         }
 
@@ -522,19 +574,20 @@ router.get('/:podId/messages', authenticateUser, async (req, res) => {
     }
 });
 
-
 /* ============================================================
    POST /api/pods/:podId/read
-   Mark all messages in this pod as read for the current user.
    ============================================================ */
-router.post('/:podId/read', authenticateUser, async (req, res) => {
+router.post('/:podId/read', authenticateUser, resolveProfile, async (req, res) => {
     const { podId } = req.params;
 
     try {
         const pod = await Pod.findById(podId);
         if (!pod) return res.status(404).json({ error: 'Pod not found' });
 
-        if (!pod.members.some(m => m.userId.toString() === req.userId)) {
+        const isMember = pod.members.some(
+            m => m.userId.toString() === req.userId
+        );
+        if (!isMember) {
             return res.status(403).json({ error: 'Not a member of this pod' });
         }
 
@@ -553,9 +606,8 @@ router.post('/:podId/read', authenticateUser, async (req, res) => {
 
 /* ============================================================
    POST /api/pods/:podId/messages
-   Accepts `text` or `content`. Returns the shaped message.
    ============================================================ */
-router.post('/:podId/messages', authenticateUser, moderationMiddleware, async (req, res) => {
+router.post('/:podId/messages', authenticateUser, resolveProfile, moderationMiddleware, async (req, res) => {
     const { podId } = req.params;
     const { text, content } = req.body;
 
@@ -568,7 +620,10 @@ router.post('/:podId/messages', authenticateUser, moderationMiddleware, async (r
         const pod = await Pod.findById(podId);
         if (!pod) return res.status(404).json({ error: 'Pod not found' });
 
-        if (!pod.members.some(m => m.userId.toString() === req.userId)) {
+        const isMember = pod.members.some(
+            m => m.userId.toString() === req.userId
+        );
+        if (!isMember) {
             return res.status(403).json({ error: 'Not a member of this pod' });
         }
 
@@ -577,6 +632,7 @@ router.post('/:podId/messages', authenticateUser, moderationMiddleware, async (r
         const message = await PodMessage.create({
             podId,
             authorId: user._id,
+            profileId: req.profileId || null,
             authorUsername: user.username || user.email.split('@')[0],
             authorAvatar: user.avatarUrl || '',
             authorName: user.fullName || '',
@@ -589,18 +645,19 @@ router.post('/:podId/messages', authenticateUser, moderationMiddleware, async (r
 
         const obj = message.toObject();
         obj.isMine = true;
-            // Fire-and-forget push to everyone else in the pod
-    pod.members.forEach(member => {
-      const uid = member.userId.toString();
-      if (uid === req.userId) return;
-      sendPushToUser(uid, {
-        title: pod.name || 'New pod message',
-        body: `${user.fullName || 'Someone'}: ${messageText.slice(0, 60)}${messageText.length > 60 ? '…' : ''}`,
-        url: '/community.html',
-        tag: `pod-${pod._id}`,
-        data: { podId: String(pod._id) }
-      }).catch(() => {});
-    });
+
+        pod.members.forEach(member => {
+            const uid = member.userId.toString();
+            if (uid === req.userId) return;
+            sendPushToUser(uid, {
+                title: pod.name || 'New pod message',
+                body: `${user.fullName || 'Someone'}: ${messageText.slice(0, 60)}${messageText.length > 60 ? '…' : ''}`,
+                url: '/community.html',
+                tag: `pod-${pod._id}`,
+                data: { podId: String(pod._id) }
+            }).catch(() => {});
+        });
+
         res.status(201).json(obj);
     } catch (error) {
         console.error('Send pod message error:', error);
@@ -610,10 +667,8 @@ router.post('/:podId/messages', authenticateUser, moderationMiddleware, async (r
 
 /* ============================================================
    POST /api/pods/:podId/checkin
-   Accepts `lessonsCompleted` (number) or `note` (string).
-   Stores the count as a number on the message.
    ============================================================ */
-router.post('/:podId/checkin', authenticateUser, async (req, res) => {
+router.post('/:podId/checkin', authenticateUser, resolveProfile, async (req, res) => {
     const { podId } = req.params;
     const { lessonsCompleted, note } = req.body || {};
 
@@ -629,7 +684,10 @@ router.post('/:podId/checkin', authenticateUser, async (req, res) => {
         const pod = await Pod.findById(podId);
         if (!pod || !pod.isActive) return res.status(404).json({ error: 'Pod not found' });
 
-        if (!pod.members.some(m => m.userId.toString() === req.userId)) {
+        const isMember = pod.members.some(
+            m => m.userId.toString() === req.userId
+        );
+        if (!isMember) {
             return res.status(403).json({ error: 'Not a member of this pod' });
         }
 
@@ -641,6 +699,7 @@ router.post('/:podId/checkin', authenticateUser, async (req, res) => {
         const existing = await PodMessage.findOne({
             podId,
             authorId: req.userId,
+            profileId: req.profileId || null,
             type: 'checkin',
             createdAt: { $gte: startOfWeek }
         });
@@ -654,6 +713,7 @@ router.post('/:podId/checkin', authenticateUser, async (req, res) => {
         const checkin = await PodMessage.create({
             podId,
             authorId: req.userId,
+            profileId: req.profileId || null,
             authorUsername: user.username || user.email.split('@')[0],
             authorAvatar: user.avatarUrl || '',
             authorName: user.fullName || '',
@@ -676,6 +736,7 @@ router.post('/:podId/checkin', authenticateUser, async (req, res) => {
 
             const notifications = pod.members.map(m => ({
                 userId: m.userId,
+                profileId: m.profileId || null,
                 type: 'streak_bonus',
                 podId: pod._id,
                 content: `🔥 Your pod hit the weekly goal! Shared streak: ${pod.sharedStreak}`
@@ -704,9 +765,8 @@ router.post('/:podId/checkin', authenticateUser, async (req, res) => {
 
 /* ============================================================
    GET /api/pods/:podId/leaderboard
-   Aggregates on the numeric lessonsCompleted field.
    ============================================================ */
-router.get('/:podId/leaderboard', authenticateUser, async (req, res) => {
+router.get('/:podId/leaderboard', authenticateUser, resolveProfile, async (req, res) => {
     const { podId } = req.params;
 
     try {

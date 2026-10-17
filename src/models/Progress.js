@@ -2,6 +2,7 @@ import mongoose from 'mongoose';
 
 const ProgressSchema = new mongoose.Schema({
     userId: { type: mongoose.Schema.Types.ObjectId, ref: 'User', required: true, index: true },
+    profileId: { type: mongoose.Schema.Types.ObjectId, default: null, index: true },
     language: { type: String, required: true },
 
     completedLevels: { type: [Number], default: [] },
@@ -15,7 +16,7 @@ const ProgressSchema = new mongoose.Schema({
     // Streak
     streak: { type: Number, default: 0 },
     longestStreak: { type: Number, default: 0 },
-    lastCompletedDate: { type: String, default: null },  // YYYY-MM-DD
+    lastCompletedDate: { type: String, default: null },
     lastCompletedLessonAt: { type: Date, default: null },
 
     // Daily tracking
@@ -33,7 +34,7 @@ const ProgressSchema = new mongoose.Schema({
     updatedAt: { type: Date, default: Date.now }
 });
 
-ProgressSchema.index({ userId: 1, language: 1 }, { unique: true });
+ProgressSchema.index({ userId: 1, profileId: 1, language: 1 }, { unique: true });
 
 const Progress = mongoose.model('Progress', ProgressSchema);
 
