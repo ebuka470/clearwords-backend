@@ -28,6 +28,7 @@ import ttsRouter from './routes/tts.js';
 import aiRoutes from './routes/ai.js';
 import referralRoutes from './routes/referrals.js';
 import pushRoutes from './routes/push.js';
+import profileRoutes from './routes/profiles.js';
 import streakRoutes from './routes/streak.js';
 
 // Background jobs
@@ -179,6 +180,7 @@ app.use('/api/streak', streakRoutes);
 app.use('/api/messages', messageRoutes);
 app.use('/api/timmy-chats', timmyChatRoutes);
 app.use('/api/push', pushRoutes);
+app.use('/api/profiles', profileRoutes);
 
 // 404
 app.use((req, res) => {
