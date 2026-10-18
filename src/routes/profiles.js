@@ -190,11 +190,10 @@ router.patch('/:id', authenticateUser, async (req, res) => {
         const user = await User.findById(req.userId);
         if (!user) return res.status(404).json({ error: 'User not found' });
 
-        // If trying to edit the main owner profile, we don't update familyProfiles, 
-        // we update the actual User model.
-        if (req.params.id === user._id.toString()) {
+        // --- UPDATE MAIN ACCOUNT ---
+        if (req.params.id === 'main' || req.params.id === user._id.toString()) {
             const { name, bio, location } = req.body;
-            if (name) user.fullName = cleanStr(name, 60);
+            if (name !== undefined) user.fullName = cleanStr(name, 60);
             if (bio !== undefined) user.bio = cleanStr(bio, 500);
             if (location !== undefined) user.location = cleanStr(location, 100);
             await user.save();
@@ -210,6 +209,7 @@ router.patch('/:id', authenticateUser, async (req, res) => {
             });
         }
 
+        // --- UPDATE CHILD PROFILE ---
         const profile = (user.familyProfiles || []).find(
             p => p._id.toString() === req.params.id
         );
