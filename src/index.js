@@ -8,6 +8,7 @@ import dotenv from 'dotenv';
 import path from 'path';
 import { fileURLToPath } from 'url';
 import { dirname } from 'path';
+import mongoose from 'mongoose';
 
 import { connectDB } from './config/mongodb.js';
 
@@ -31,6 +32,13 @@ import pushRoutes from './routes/push.js';
 import profileRoutes from './routes/profiles.js';
 import streakRoutes from './routes/streak.js';
 
+// Models (Needed for Index Syncing)
+import Progress from './models/Progress.js';
+import LessonCompletion from './models/LessonCompletion.js';
+import StreakFreeze from './models/StreakFreeze.js';
+import TimmyChat from './models/TimmyChat.js';
+import UsageCounter from './models/UsageCounter.js';
+
 // Background jobs
 import { startPairDissolver } from './jobs/pairDissolver.js';
 import { startStreakReminderJob } from './jobs/streakReminder.js';
@@ -46,6 +54,28 @@ const app = express();
 const PORT = process.env.PORT || 3000;
 
 connectDB();
+
+// ============================================
+// AUTOMATIC INDEX SYNCING (Fixes the E11000 error)
+// ============================================
+mongoose.connection.once('open', async () => {
+    try {
+        console.log('🔄 Syncing database indexes to match latest schema...');
+        
+        // This creates new indexes and drops old, unused ones
+        await Promise.all([
+            Progress.syncIndexes(),
+            LessonCompletion.syncIndexes(),
+            StreakFreeze.syncIndexes(),
+            TimmyChat.syncIndexes(),
+            UsageCounter.syncIndexes()
+        ]);
+        
+        console.log('✅ Database indexes synced perfectly.');
+    } catch (error) {
+        console.error('❌ Failed to sync indexes:', error.message);
+    }
+});
 
 // ============================================
 // PAYSTACK WEBHOOK — must come BEFORE express.json()
@@ -73,7 +103,7 @@ app.use(helmet({ contentSecurityPolicy: false, crossOriginEmbedderPolicy: false 
 app.use(cors({
     origin: function (origin, callback) {
         if (!origin) return callback(null, true);
-                const allowedOrigins = [
+        const allowedOrigins = [
             'https://clearwords.vercel.app',
             'https://clearwords-versions.vercel.app',
             'https://clearwords-updates.vercel.app',
@@ -130,6 +160,7 @@ app.get('/', (req, res) => {
             ai: '/api/ai',
             referrals: '/api/referrals',
             streak: '/api/streak',
+            profiles: '/api/profiles',
             tts: '/clearwordsapi/tts'
         }
     });
@@ -217,23 +248,15 @@ setInterval(keepAlive, KEEP_ALIVE_INTERVAL);
 
 // Start server
 app.listen(PORT, () => {
-    console.log('🚀 ClearWords Backend v3.0 — Community Model');
+    console.log('🚀 ClearWords Backend v3.0 — Family Accounts Enabled');
     console.log(`📍 Running on port ${PORT}`);
     console.log(`📊 Health: /health`);
-    console.log(`👤 Auth: /api/auth (config, signup, me)`);
-    console.log(`👥 Users: /api/users`);
+    console.log(`👤 Auth: /api/auth`);
+    console.log(`👨‍👩‍👧 Profiles: /api/profiles`);
     console.log(`📈 Progress: /api/progress`);
     console.log(`🫂 Pods: /api/pods`);
-    console.log(`🤝 Pairs: /api/pairs (request, match, accept)`);
-    console.log(`🎴 Cards: /api/cards`);
-    console.log(`🚨 Reports: /api/reports`);
-    console.log(`🔔 Notifications: /api/notifications`);
-    console.log(`💰 Subscription: /api/subscription`);
-    console.log(`📚 Curriculum: /api/curriculum`);
-    console.log(`🤖 AI: /api/ai (chat, custom-lesson, usage)`);
-    console.log(`🎯 Referrals: /api/referrals`);
-    console.log(`🔥 Streak: /api/streak`);
+    console.log(`🤝 Pairs: /api/pairs`);
+    console.log(`🤖 AI: /api/ai`);
     console.log(`🎤 TTS: /clearwordsapi/tts + /api/tts`);
     console.log(`💳 Paystack webhook: /api/subscription/webhook`);
-    console.log(`💤 Dormant pods: every 12h`);
 });
