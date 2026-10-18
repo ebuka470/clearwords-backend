@@ -324,8 +324,9 @@ router.post('/:id/switch', authenticateUser, async (req, res) => {
         const user = await User.findById(req.userId);
         if (!user) return res.status(404).json({ error: 'User not found' });
 
-        // If they are switching to their main account
-        if (req.params.id === user._id.toString() || req.params.id === 'null') {
+        // --- HANDLE MAIN ACCOUNT SWITCH ---
+        // If the ID is 'main' or matches the User's root _id, we switch to the Main Account
+        if (req.params.id === 'main' || req.params.id === user._id.toString()) {
             user.activeProfileId = null;
             await user.save();
 
@@ -352,6 +353,7 @@ router.post('/:id/switch', authenticateUser, async (req, res) => {
             });
         }
 
+        // --- HANDLE CHILD PROFILE SWITCH ---
         const profile = (user.familyProfiles || []).find(
             p => p._id.toString() === req.params.id
         );
