@@ -1,34 +1,44 @@
 import express from 'express';
 import Notification from '../models/Notification.js';
 import { authenticateUser } from '../middleware/auth.js';
+import { resolveProfile } from '../middleware/profile.js'; // <-- ADD THIS
 
 const router = express.Router();
 
-/**
- * GET /api/notifications
- */
-router.get('/', authenticateUser, async (req, res) => {
-    const page = parseInt(req.query.page) || 1;
-    const limit = parseInt(req.query.limit) || 20;
-
+// GET /api/notifications/unread
+router.get('/unread', authenticateUser, resolveProfile, async (req, res) => { // <-- ADD resolveProfile
     try {
-        const skip = (page - 1) * limit;
-        const notifications = await Notification.find({ userId: req.userId })
-            .sort({ createdAt: -1 })
-            .skip(skip)
-            .limit(limit);
-
-        const total = await Notification.countDocuments({ userId: req.userId });
-
-        res.json({
-            data: notifications,
-            total,
-            page,
-            limit,
-            hasMore: skip + notifications.length < total
+        const profileScope = req.profileId ? { profileId: req.profileId } : { $or: [{ profileId: null }, { profileId: { $exists: false } }] };
+        
+        const count = await Notification.countDocuments({
+            userId: req.userId,
+            ...profileScope,
+            isRead: false
         });
+        
+        res.json({ unread: count, count });
     } catch (error) {
-        console.error('Get notifications error:', error);
+        console.error('Unread notifications error:', error);
+        res.status(400).json({ error: error.message });
+    }
+});
+
+// GET /api/notifications
+router.get('/', authenticateUser, resolveProfile, async (req, res) => {
+    try {
+        const profileScope = req.profileId ? { profileId: req.profileId } : { $or: [{ profileId: null }, { profileId: { $exists: false } }] };
+        
+        const limit = parseInt(req.query.limit) || 50;
+        const items = await Notification.find({
+            userId: req.userId,
+            ...profileScope
+        })
+        .sort({ createdAt: -1 })
+        .limit(limit);
+        
+        res.json({ data: items, items, notifications: items });
+    } catch (error) {
+        console.error('Notifications error:', error);
         res.status(400).json({ error: error.message });
     }
 });

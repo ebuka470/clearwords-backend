@@ -130,7 +130,14 @@ router.get('/', authenticateUser, resolveProfile, async (req, res) => {
     const { language } = req.query;
 
     try {
-        const query = { userId: req.userId, profileId: req.profileId || null };
+        // Strict profile matching
+        const query = { userId: req.userId };
+        if (req.profileId) {
+            query.profileId = req.profileId;
+        } else {
+            query.$or = [{ profileId: null }, { profileId: { $exists: false } }];
+        }
+        
         if (language) query.language = language;
 
         let progress = await Progress.findOne(query);
