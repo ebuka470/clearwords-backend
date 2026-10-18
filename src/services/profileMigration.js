@@ -13,16 +13,8 @@ import Referral from '../models/Referral.js';
 import Notification from '../models/Notification.js';
 import UsageCounter from '../models/UsageCounter.js';
 
-/**
- * Family Accounts are available on Premium AND Immersive.
- * (Same rule used by routes/profiles.js.)
- */
 export const FAMILY_TIERS = ['premium', 'immersive'];
 
-/**
- * Returns true if the user is on an active Premium or Immersive plan.
- * Expiry-aware: a user whose subscription has lapsed is treated as free.
- */
 export function isFamilyEligible(user) {
     if (!user) return false;
     if (!FAMILY_TIERS.includes(user.subscriptionTier)) return false;
@@ -32,23 +24,6 @@ export function isFamilyEligible(user) {
     return true;
 }
 
-/**
- * One-time migration: when a personal Premium/Immersive user enables family,
- * create a "Me" owner profile from their existing user data, set ALL their
- * existing progress rows' profileId to that new profile, and set
- * activeProfileId.
- *
- * Idempotent — safe to call multiple times. If the user already has any
- * family profiles, nothing is touched.
- *
- * @param {string|mongoose.Types.ObjectId} userId
- * @returns {Promise<{
- *   migrated: boolean,
- *   profileId?: mongoose.Types.ObjectId,
- *   reason?: string,
- *   moved?: Record<string, number>
- * }>}
- */
 export async function migratePersonalUserToFamily(userId) {
     if (!userId || !mongoose.Types.ObjectId.isValid(String(userId))) {
         return { migrated: false, reason: 'invalid_user_id' };
@@ -59,12 +34,10 @@ export async function migratePersonalUserToFamily(userId) {
     if (user.deletedAt) return { migrated: false, reason: 'user_deleted' };
     if (user.isBanned) return { migrated: false, reason: 'user_banned' };
 
-    // Already a family account — nothing to migrate
     if ((user.familyProfiles || []).length > 0) {
         return { migrated: false, reason: 'already_has_profiles' };
     }
 
-    // Premium or Immersive (active) required
     if (!isFamilyEligible(user)) {
         return { migrated: false, reason: 'not_family_eligible' };
     }
@@ -86,11 +59,9 @@ export async function migratePersonalUserToFamily(userId) {
 
     user.familyProfiles = [meProfile];
     user.activeProfileId = profileId;
-    // Legacy flag so the UI knows this account is now a family account
     user.accountType = 'family';
     await user.save();
 
-    // Match rows that were never scoped OR are explicitly null
     const nullScope = {
         $or: [
             { profileId: null },
@@ -110,7 +81,6 @@ export async function migratePersonalUserToFamily(userId) {
         ]
     };
 
-    // 2. Re-scope every profile-aware collection for this user
     const [
         progressRes,
         lessonRes,
@@ -125,58 +95,20 @@ export async function migratePersonalUserToFamily(userId) {
         notifRes,
         usageRes
     ] = await Promise.all([
-        Progress.updateMany(
-            { userId: user._id, ...nullScope },
-            { $set: { profileId } }
-        ),
-        LessonCompletion.updateMany(
-            { userId: user._id, ...nullScope },
-            { $set: { profileId } }
-        ),
-        StreakFreeze.updateMany(
-            { userId: user._id, ...nullScope },
-            { $set: { profileId } }
-        ),
-        TimmyChat.updateMany(
-            { userId: user._id, ...nullScope },
-            { $set: { profileId } }
-        ),
-        ProgressCard.updateMany(
-            { userId: user._id, ...nullScope },
-            { $set: { profileId } }
-        ),
-        Pair.updateMany(
-            { userA: user._id, ...nullScopeA },
-            { $set: { profileIdA: profileId } }
-        ),
-        Pair.updateMany(
-            { userB: user._id, ...nullScopeB },
-            { $set: { profileIdB: profileId } }
-        ),
-        PairMessage.updateMany(
-            { senderId: user._id, ...nullScope },
-            { $set: { profileId } }
-        ),
-        PodMessage.updateMany(
-            { authorId: user._id, ...nullScope },
-            { $set: { profileId } }
-        ),
-        Referral.updateMany(
-            { referrerId: user._id, ...nullScope },
-            { $set: { profileId } }
-        ),
-        Notification.updateMany(
-            { userId: user._id, ...nullScope },
-            { $set: { profileId } }
-        ),
-        UsageCounter.updateMany(
-            { userId: user._id, ...nullScope },
-            { $set: { profileId } }
-        )
+        Progress.updateMany({ userId: user._id, ...nullScope }, { $set: { profileId } }),
+        LessonCompletion.updateMany({ userId: user._id, ...nullScope }, { $set: { profileId } }),
+        StreakFreeze.updateMany({ userId: user._id, ...nullScope }, { $set: { profileId } }),
+        TimmyChat.updateMany({ userId: user._id, ...nullScope }, { $set: { profileId } }),
+        ProgressCard.updateMany({ userId: user._id, ...nullScope }, { $set: { profileId } }),
+        Pair.updateMany({ userA: user._id, ...nullScopeA }, { $set: { profileIdA: profileId } }),
+        Pair.updateMany({ userB: user._id, ...nullScopeB }, { $set: { profileIdB: profileId } }),
+        PairMessage.updateMany({ senderId: user._id, ...nullScope }, { $set: { profileId } }),
+        PodMessage.updateMany({ authorId: user._id, ...nullScope }, { $set: { profileId } }),
+        Referral.updateMany({ referrerId: user._id, ...nullScope }, { $set: { profileId } }),
+        Notification.updateMany({ userId: user._id, ...nullScope }, { $set: { profileId } }),
+        UsageCounter.updateMany({ userId: user._id, ...nullScope }, { $set: { profileId } })
     ]);
 
-    // 3. Re-scope pod memberships — set familyId + profileId on each
-    //    member entry belonging to this user.
     let podsTouched = 0;
     const pods = await Pod.find({ 'members.userId': user._id });
     for (const pod of pods) {

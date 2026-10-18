@@ -27,15 +27,21 @@ const VALID_LANGUAGES = ['yoruba', 'igbo', 'hausa', 'pidgin', 'urhobo', 'itsekir
    HELPERS
    ============================================================ */
 
-function publicProfile(p) {
+function publicProfile(p, userContext = null) {
+    // If this is the owner profile, we want to pull the actual name/bio/location 
+    // from the main User document so it reflects the primary account details.
+    const isOwner = p.role === 'owner';
+    
     return {
         _id: p._id,
-        name: p.name,
+        name: isOwner && userContext ? userContext.fullName : p.name,
         emoji: p.emoji,
         color: p.color,
         language: p.language,
         role: p.role,
-        createdAt: p.createdAt
+        createdAt: p.createdAt,
+        bio: isOwner && userContext ? userContext.bio : '',
+        location: isOwner && userContext ? userContext.location : ''
     };
 }
 
@@ -45,9 +51,6 @@ function cleanStr(v, max) {
 
 /* ============================================================
    POST /api/profiles/enable-family
-   One-time migration for a personal Premium/Immersive user.
-   Idempotent — safe to call repeatedly.
-   MUST be declared before any /:id route that could shadow it.
    ============================================================ */
 router.post('/enable-family', authenticateUser, async (req, res) => {
     try {
@@ -87,15 +90,31 @@ router.post('/enable-family', authenticateUser, async (req, res) => {
 
 /* ============================================================
    GET /api/profiles
-   List all family profiles for the current user.
    ============================================================ */
 router.get('/', authenticateUser, async (req, res) => {
     try {
-        const user = await User.findById(req.userId).select('familyProfiles activeProfileId');
+        const user = await User.findById(req.userId);
         if (!user) return res.status(404).json({ error: 'User not found' });
 
+        let profiles = [...(user.familyProfiles || [])];
+        const hasOwner = profiles.some(p => p.role === 'owner');
+        
+        // Dynamically inject the Owner profile if it doesn't exist
+        // This allows a user to switch back to their main account.
+        if (!hasOwner) {
+            profiles.unshift({
+                _id: user._id, 
+                name: user.fullName ? user.fullName.split(' ')[0] : 'Me',
+                emoji: '🧑',
+                color: '#2E8B57',
+                language: user.language || 'yoruba',
+                role: 'owner',
+                createdAt: user.createdAt
+            });
+        }
+
         res.json({
-            profiles: (user.familyProfiles || []).map(publicProfile),
+            profiles: profiles.map(p => publicProfile(p, user)),
             activeProfileId: user.activeProfileId || null,
             maxProfiles: MAX_PROFILES
         });
@@ -107,7 +126,6 @@ router.get('/', authenticateUser, async (req, res) => {
 
 /* ============================================================
    POST /api/profiles
-   Create a family profile (Premium or Immersive only, max 6).
    ============================================================ */
 router.post('/', authenticateUser, async (req, res) => {
     try {
@@ -130,11 +148,8 @@ router.post('/', authenticateUser, async (req, res) => {
         }
 
         const { name, emoji, color, language, role } = req.body || {};
-
         const cleanName = cleanStr(name, 40);
-        if (!cleanName) {
-            return res.status(400).json({ error: 'name is required' });
-        }
+        if (!cleanName) return res.status(400).json({ error: 'name is required' });
 
         const cleanLang = language && VALID_LANGUAGES.includes(language)
             ? language
@@ -142,12 +157,9 @@ router.post('/', authenticateUser, async (req, res) => {
 
         const profileRole = role === 'owner' ? 'owner' : 'learner';
 
-        // Only one owner profile per family
         if (profileRole === 'owner') {
             const existingOwner = (user.familyProfiles || []).some(p => p.role === 'owner');
-            if (existingOwner) {
-                return res.status(400).json({ error: 'An owner profile already exists' });
-            }
+            if (existingOwner) return res.status(400).json({ error: 'An owner profile already exists' });
         }
 
         const newProfile = {
@@ -172,13 +184,31 @@ router.post('/', authenticateUser, async (req, res) => {
 
 /* ============================================================
    PATCH /api/profiles/:id
-   Rename / emoji / color / language.
-   Note: existing profiles can be edited even after a plan lapses.
    ============================================================ */
 router.patch('/:id', authenticateUser, async (req, res) => {
     try {
         const user = await User.findById(req.userId);
         if (!user) return res.status(404).json({ error: 'User not found' });
+
+        // If trying to edit the main owner profile, we don't update familyProfiles, 
+        // we update the actual User model.
+        if (req.params.id === user._id.toString()) {
+            const { name, bio, location } = req.body;
+            if (name) user.fullName = cleanStr(name, 60);
+            if (bio !== undefined) user.bio = cleanStr(bio, 500);
+            if (location !== undefined) user.location = cleanStr(location, 100);
+            await user.save();
+
+            return res.json({
+                profile: {
+                    _id: user._id,
+                    name: user.fullName,
+                    role: 'owner',
+                    bio: user.bio,
+                    location: user.location
+                }
+            });
+        }
 
         const profile = (user.familyProfiles || []).find(
             p => p._id.toString() === req.params.id
@@ -208,7 +238,6 @@ router.patch('/:id', authenticateUser, async (req, res) => {
 
 /* ============================================================
    DELETE /api/profiles/:id
-   Cascade-delete all scoped data, leave pods, end pairs.
    ============================================================ */
 router.delete('/:id', authenticateUser, async (req, res) => {
     try {
@@ -220,13 +249,12 @@ router.delete('/:id', authenticateUser, async (req, res) => {
         );
         if (!profile) return res.status(404).json({ error: 'Profile not found' });
 
-        if (profile.role === 'owner') {
-            return res.status(400).json({ error: 'Cannot delete the owner profile' });
+        if (profile.role === 'owner' || req.params.id === user._id.toString()) {
+            return res.status(400).json({ error: 'Cannot delete the main account profile' });
         }
 
         const pid = profile._id;
 
-        // 1. Leave pods (remove from members array, add to formerMembers)
         const pods = await Pod.find({ 'members.profileId': pid });
         for (const pod of pods) {
             pod.formerMembers = pod.formerMembers || [];
@@ -238,7 +266,6 @@ router.delete('/:id', authenticateUser, async (req, res) => {
             await pod.save();
         }
 
-        // 2. End pairs with reason 'profile_removed'
         await Pair.updateMany(
             {
                 $or: [
@@ -257,7 +284,6 @@ router.delete('/:id', authenticateUser, async (req, res) => {
             }
         );
 
-        // 3. Delete scoped data
         await Promise.all([
             Progress.deleteMany({ userId: user._id, profileId: pid }),
             LessonCompletion.deleteMany({ userId: user._id, profileId: pid }),
@@ -270,14 +296,13 @@ router.delete('/:id', authenticateUser, async (req, res) => {
             UsageCounter.deleteMany({ userId: user._id, profileId: pid })
         ]);
 
-        // 4. Remove the profile
         user.familyProfiles = user.familyProfiles.filter(
             p => p._id.toString() !== pid.toString()
         );
+        
         if (user.activeProfileId && user.activeProfileId.toString() === pid.toString()) {
-            // Fall back to the owner profile, or null
-            const owner = user.familyProfiles.find(p => p.role === 'owner');
-            user.activeProfileId = owner ? owner._id : null;
+            // If activeProfileId is the deleted one, revert to Main Account (null)
+            user.activeProfileId = null; 
         }
         await user.save();
 
@@ -293,12 +318,39 @@ router.delete('/:id', authenticateUser, async (req, res) => {
 
 /* ============================================================
    POST /api/profiles/:id/switch
-   Set activeProfileId.
    ============================================================ */
 router.post('/:id/switch', authenticateUser, async (req, res) => {
     try {
         const user = await User.findById(req.userId);
         if (!user) return res.status(404).json({ error: 'User not found' });
+
+        // If they are switching to their main account
+        if (req.params.id === user._id.toString() || req.params.id === 'null') {
+            user.activeProfileId = null;
+            await user.save();
+
+            const progress = await Progress.findOne({
+                userId: user._id,
+                profileId: null
+            }).lean();
+
+            return res.json({
+                activeProfileId: null,
+                profile: {
+                    _id: user._id,
+                    name: user.fullName,
+                    role: 'owner',
+                    bio: user.bio,
+                    location: user.location
+                },
+                progress: progress ? {
+                    language: progress.language,
+                    currentLevel: progress.currentLevel || 1,
+                    totalXP: progress.totalXP || 0,
+                    streak: progress.streak || 0
+                } : null
+            });
+        }
 
         const profile = (user.familyProfiles || []).find(
             p => p._id.toString() === req.params.id
@@ -315,7 +367,7 @@ router.post('/:id/switch', authenticateUser, async (req, res) => {
 
         res.json({
             activeProfileId: profile._id,
-            profile: publicProfile(profile),
+            profile: publicProfile(profile, user),
             progress: progress ? {
                 language: progress.language,
                 currentLevel: progress.currentLevel || 1,
@@ -331,21 +383,27 @@ router.post('/:id/switch', authenticateUser, async (req, res) => {
 
 /* ============================================================
    GET /api/profiles/:id/overview
-   Parent (owner) view — read-only stats.
-   Excludes Timmy chats, pods, pairs, and messages.
    ============================================================ */
 router.get('/:id/overview', authenticateUser, async (req, res) => {
     try {
         const user = await User.findById(req.userId);
         if (!user) return res.status(404).json({ error: 'User not found' });
 
-        const profile = (user.familyProfiles || []).find(
-            p => p._id.toString() === req.params.id
-        );
-        if (!profile) return res.status(404).json({ error: 'Profile not found' });
+        let pid = null;
+        let profileData = null;
 
-        const pid = profile._id;
-        const language = req.query.language || profile.language || user.language || 'yoruba';
+        if (req.params.id !== user._id.toString()) {
+            const profile = (user.familyProfiles || []).find(
+                p => p._id.toString() === req.params.id
+            );
+            if (!profile) return res.status(404).json({ error: 'Profile not found' });
+            pid = profile._id;
+            profileData = profile;
+        } else {
+            profileData = { name: user.fullName, role: 'owner' };
+        }
+
+        const language = req.query.language || profileData.language || user.language || 'yoruba';
 
         const progress = await Progress.findOne({
             userId: user._id,
@@ -363,7 +421,6 @@ router.get('/:id/overview', authenticateUser, async (req, res) => {
             .select('lessonId levelId xpEarned perfect completedAt')
             .lean();
 
-        // Saved words are user-level; surface the ones in this profile's language.
         const savedWords = (user.savedWords || [])
             .filter(w => w.language === language)
             .slice(0, 20)
@@ -375,7 +432,7 @@ router.get('/:id/overview', authenticateUser, async (req, res) => {
             }));
 
         res.json({
-            profile: publicProfile(profile),
+            profile: profileData ? publicProfile(profileData, user) : null,
             language,
             level: progress?.currentLevel || 1,
             xp: progress?.totalXP || 0,
